@@ -1,8 +1,8 @@
 # Usage-Guard
 
-Version 0.1 proof of concept.
+Version 0.1 is a proof of concept.
 
-Usage-Guard is a Windows systray proof of concept for limiting computer, application, and website usage with daily, weekly, or monthly quotas.
+Usage-Guard is a Windows systray application for limiting computer, application, and website usage with daily, weekly, or monthly quotas.
 
 This project does not try to measure activity itself. It uses ActivityWatch as the activity source, then adds a small rule engine and systray UI for limits.
 
@@ -12,7 +12,7 @@ License: GNU General Public License v3.0 or later. See `LICENSE`.
 
 ## Status
 
-This is an early proof of concept, not a finished blocker.
+Version 0.1 is an early proof of concept, not a finished blocker.
 
 Implemented:
 
