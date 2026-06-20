@@ -10,6 +10,12 @@ Author: nicklausFR
 
 License: GNU General Public License v3.0 or later. See `LICENSE`.
 
+## Acknowledgements
+
+Usage-Guard relies on [ActivityWatch](https://activitywatch.net/) for activity tracking.
+
+ActivityWatch is an open-source project that provides the local activity data used by this application. Usage-Guard adds its own rule engine and systray UI on top of that data.
+
 ## Status
 
 Version 0.1 is an early proof of concept, not a finished blocker.
