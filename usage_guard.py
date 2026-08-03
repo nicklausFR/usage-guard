@@ -145,14 +145,19 @@ class AppUsageStore:
         if not self.path.exists():
             return self._empty_data()
         try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
+            # Accept a UTF-8 BOM too: some Windows tools write JSON that way.
+            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
             if not isinstance(data.get("days"), dict):
                 raise ValueError("invalid activity store")
             data.setdefault("targets", {})
             data.setdefault("excluded", [])
             data.setdefault("browser_categories", {})
+            data.setdefault("browser_labels", {})
+            data.setdefault("browser_specific_sites", {})
+            data.setdefault("other_site_days", {})
             data.setdefault("passive_days", {})
             data.setdefault("passive_excluded", [])
+            data.setdefault("merged_targets", {})
             data.setdefault("system_days", {})
             data["version"] = 2
             return data
@@ -172,15 +177,19 @@ class AppUsageStore:
             "targets": {},
             "excluded": [],
             "browser_categories": {},
+            "browser_labels": {},
+            "browser_specific_sites": {},
+            "other_site_days": {},
             "passive_days": {},
             "passive_excluded": [],
+            "merged_targets": {},
             "system_days": {},
         }
 
     def _migrate_legacy_targets(self):
         """Merge pre-category app keys without losing any recorded seconds."""
         changed = False
-        for apps in self.data["days"].values():
+        for day, apps in self.data["days"].items():
             for key, seconds in list(apps.items()):
                 canonical = _canonical_target_key(key)
                 if canonical == key:
@@ -188,6 +197,35 @@ class AppUsageStore:
                 apps[canonical] = round(float(apps.get(canonical, 0.0)) + float(seconds), 3)
                 del apps[key]
                 self.data["targets"].setdefault(canonical, {"label": str(key)})
+                changed = True
+            # A Chrome PWA can expose a long page subtitle at its first tick
+            # (for example "ChatGPT: Chat, Work..."). Keep that time under
+            # the stable application entry used by subsequent ticks.
+            for key, seconds in list(apps.items()):
+                if not key.startswith("app:chatgpt:"):
+                    continue
+                stable_key = "app:chatgpt"
+                apps[stable_key] = round(
+                    float(apps.get(stable_key, 0.0)) + float(seconds), 3
+                )
+                del apps[key]
+                self.data["targets"].setdefault(stable_key, {})["label"] = "ChatGPT"
+                changed = True
+        # Earlier builds stored every browser host as its own entry. Keep only
+        # YouTube and sites explicitly requested by the user separate.
+        for apps in self.data["days"].values():
+            for key, seconds in list(apps.items()):
+                browser, host = _browser_site_parts(key)
+                if not browser or not host or self.is_browser_site_specific(browser, host):
+                    continue
+                grouped_key = f"site:{browser}:other-sites"
+                apps[grouped_key] = round(
+                    float(apps.get(grouped_key, 0.0)) + float(seconds), 3
+                )
+                self._record_other_site(browser, day, host, seconds)
+                del apps[key]
+                self.data["targets"].pop(key, None)
+                self.data["targets"].setdefault(grouped_key, {})["label"] = "Autres sites"
                 changed = True
         excluded = []
         for key in self.data["excluded"]:
@@ -199,6 +237,9 @@ class AppUsageStore:
         # Earlier builds represented a browser group as "Internet / Brave".
         # Brave is an application group, not a second user category.
         for metadata in self.data["targets"].values():
+            if metadata.get("category") == "Autres":
+                metadata["category"] = "Applications non classées"
+                changed = True
             category = str(metadata.get("category", ""))
             if category.lower().endswith(" / brave"):
                 metadata["category"] = category.rsplit(" / ", 1)[0]
@@ -215,6 +256,17 @@ class AppUsageStore:
         for key, metadata in self.data["targets"].items():
             browser = _browser_for_target(key)
             category = browser_categories.get(browser) if browser else None
+            # A category chosen for an individual browser site is a child of
+            # that browser, never a replacement for the browser's root group.
+            if (
+                browser
+                and category
+                and metadata.get("category")
+                and metadata.get("category") != category
+            ):
+                metadata.setdefault("site_category", metadata["category"])
+                metadata["category"] = category
+                changed = True
             if category and metadata.get("category") != category:
                 metadata["category"] = category
                 changed = True
@@ -229,19 +281,26 @@ class AppUsageStore:
         return changed
 
     def target_for_context(self, context):
-        app_name = _display_app_name(context.app_name)
+        app_name = _display_app_name(context.app_name, context.window_title)
         executable = Path(str(context.app_name)).name.lower()
         host = _site_host(context.url)
         browser_apps = _browser_apps()
         if app_name and executable in browser_apps and host:
-            return UsageTarget(
-                key=f"site:{executable}:{host}",
-                label=host,
+            site_key = host if self.is_browser_site_specific(executable, host) else "other-sites"
+            target = UsageTarget(
+                key=f"site:{executable}:{site_key}",
+                label=host if site_key == host else "Autres sites",
                 category=self.data["browser_categories"].get(
                     executable, _browser_label(executable)
                 ),
+                detail_host=host if site_key == "other-sites" else "",
             )
-        return UsageTarget(
+            return self._resolved_target(target)
+        # A browser without an identifiable site is deliberately not counted:
+        # there is no meaningful activity to attribute it to.
+        if executable in browser_apps:
+            return None
+        target = UsageTarget(
             key=f"app:{app_name.lower()}",
             label=app_name,
             category=(
@@ -250,6 +309,75 @@ class AppUsageStore:
                 else ""
             ),
         )
+        return self._resolved_target(target)
+
+    def is_browser_site_specific(self, browser, host):
+        host = str(host).lower()
+        if _is_youtube_host(host):
+            return True
+        sites = self.data.get("browser_specific_sites", {}).get(str(browser).lower(), [])
+        return host in sites
+
+    def make_browser_site_specific(self, browser, host):
+        browser = str(browser).lower()
+        host = _site_host(host) or str(host).lower().strip()
+        if not host:
+            return
+        sites = self.data.setdefault("browser_specific_sites", {}).setdefault(browser, [])
+        if host not in sites:
+            sites.append(host)
+            details = self.data.get("other_site_days", {}).get(browser, {})
+            for day, hosts in details.items():
+                seconds = float(hosts.pop(host, 0.0))
+                if not seconds:
+                    continue
+                apps = self.data["days"].setdefault(day, {})
+                grouped_key = f"site:{browser}:other-sites"
+                apps[grouped_key] = round(float(apps.get(grouped_key, 0.0)) - seconds, 3)
+                if apps[grouped_key] <= 0:
+                    apps.pop(grouped_key, None)
+                specific_key = f"site:{browser}:{host}"
+                apps[specific_key] = round(float(apps.get(specific_key, 0.0)) + seconds, 3)
+                metadata = self.data["targets"].setdefault(specific_key, {})
+                metadata["label"] = host
+                # A specific site remains part of its browser's category.
+                # Without this, it falls back to the generic "Autres" group.
+                category = self.data.get("browser_categories", {}).get(browser)
+                if category:
+                    metadata["category"] = category
+            self._dirty = True
+            self.save(force=True)
+
+    def other_sites(self, browser):
+        totals = {}
+        for hosts in self.data.get("other_site_days", {}).get(str(browser).lower(), {}).values():
+            for host, seconds in hosts.items():
+                totals[host] = totals.get(host, 0.0) + float(seconds)
+        return totals
+
+    def _record_other_site(self, browser, day, host, seconds):
+        hosts = (
+            self.data.setdefault("other_site_days", {})
+            .setdefault(browser, {})
+            .setdefault(day, {})
+        )
+        hosts[host] = round(float(hosts.get(host, 0.0)) + float(seconds), 3)
+
+    def _resolved_target(self, target):
+        key = target.key
+        merged_targets = self.data.get("merged_targets", {})
+        seen = set()
+        while key in merged_targets and key not in seen:
+            seen.add(key)
+            key = merged_targets[key]
+        if key == target.key:
+            return target
+        metadata = self.data["targets"].get(key, {})
+        return UsageTarget(
+            key=key,
+            label=metadata.get("label", _legacy_label(key)),
+            category=metadata.get("category", target.category),
+        )
 
     def add_seconds(self, target, seconds, when=None):
         if not target or not target.key or seconds <= 0 or self.is_excluded(target.key):
@@ -257,8 +385,10 @@ class AppUsageStore:
         day = (when or date.today()).isoformat()
         apps = self.data["days"].setdefault(day, {})
         apps[target.key] = round(float(apps.get(target.key, 0.0)) + seconds, 3)
+        if target.detail_host:
+            self._record_other_site(_other_sites_browser(target.key), day, target.detail_host, seconds)
         metadata = self.data["targets"].setdefault(target.key, {})
-        metadata["label"] = target.label
+        metadata.setdefault("label", target.label)
         if target.category and not metadata.get("category"):
             metadata["category"] = target.category
         self._dirty = True
@@ -310,13 +440,126 @@ class AppUsageStore:
         self._dirty = True
         self.save(force=True)
 
+    def unexclude(self, key):
+        if key in self.data["excluded"]:
+            self.data["excluded"].remove(key)
+            self._dirty = True
+            self.save(force=True)
+
+    def excluded_targets(self):
+        return [
+            UsageTarget(
+                key=key,
+                label=self.data["targets"].get(key, {}).get("label", _legacy_label(key)),
+            )
+            for key in self.data["excluded"]
+        ]
+
+    def merge_candidates(self, source_key):
+        keys = set(self.data["targets"])
+        for apps in self.data["days"].values():
+            keys.update(apps)
+        return [
+            UsageTarget(
+                key=key,
+                label=self.data["targets"].get(key, {}).get("label", _legacy_label(key)),
+            )
+            for key in sorted(keys)
+            if key != source_key
+        ]
+
+    def merge_target_into(self, source_key, destination_key):
+        """Move all recorded usage from one application into another."""
+        if not source_key or source_key == destination_key:
+            return
+        for apps in self.data["days"].values():
+            if source_key not in apps:
+                continue
+            apps[destination_key] = round(
+                float(apps.get(destination_key, 0.0)) + float(apps.pop(source_key)), 3
+            )
+        source_metadata = self.data["targets"].pop(source_key, {})
+        destination_metadata = self.data["targets"].setdefault(destination_key, {})
+        for key, value in source_metadata.items():
+            destination_metadata.setdefault(key, value)
+        if source_key in self.data["excluded"]:
+            self.data["excluded"].remove(source_key)
+        merged_targets = self.data.setdefault("merged_targets", {})
+        for key, destination in list(merged_targets.items()):
+            if destination == source_key:
+                merged_targets[key] = destination_key
+        merged_targets[source_key] = destination_key
+        self._dirty = True
+        self.save(force=True)
+
     def set_category(self, key, category):
         metadata = self.data["targets"].setdefault(key, {})
         category = str(category).strip()
+        browser = _browser_for_target(key)
+        if browser:
+            if category:
+                metadata["site_category"] = category
+                metadata.setdefault(
+                    "category", self.data.get("browser_categories", {}).get(browser, _browser_label(browser))
+                )
+            else:
+                metadata.pop("site_category", None)
+            self._dirty = True
+            self.save(force=True)
+            return
         if category:
+            metadata.pop("root", None)
             metadata["category"] = category
         else:
             metadata.pop("category", None)
+        self._dirty = True
+        self.save(force=True)
+
+    def make_root(self, key):
+        metadata = self.data["targets"].setdefault(key, {})
+        metadata["root"] = True
+        metadata.pop("category", None)
+        metadata.pop("site_category", None)
+        self._dirty = True
+        self.save(force=True)
+
+    def make_browser_root(self, browser):
+        self.data.setdefault("browser_categories", {})[str(browser).lower()] = "__root__"
+        for key, metadata in self.data["targets"].items():
+            if _browser_for_target(key) == str(browser).lower():
+                metadata["category"] = "__root__"
+        self._dirty = True
+        self.save(force=True)
+
+    def browser_label(self, browser):
+        browser = str(browser).lower()
+        return self.data.get("browser_labels", {}).get(browser, _browser_label(browser))
+
+    def rename_browser(self, browser, label):
+        label = str(label).strip()
+        if label:
+            self.data.setdefault("browser_labels", {})[str(browser).lower()] = label
+            self._dirty = True
+            self.save(force=True)
+
+    def rename_target(self, key, label):
+        label = str(label).strip()
+        if not label:
+            return
+        self.data["targets"].setdefault(key, {})["label"] = label
+        self._dirty = True
+        self.save(force=True)
+
+    def rename_category(self, old_category, new_category):
+        new_category = str(new_category).strip()
+        if not new_category or new_category == old_category:
+            return
+        for browser, category in self.data.get("browser_categories", {}).items():
+            if category == old_category:
+                self.data["browser_categories"][browser] = new_category
+        for metadata in self.data["targets"].values():
+            if metadata.get("category") == old_category:
+                metadata["category"] = new_category
         self._dirty = True
         self.save(force=True)
 
@@ -334,26 +577,63 @@ class AppUsageStore:
         self._dirty = True
         self.save(force=True)
 
+    def clear_browser_category(self, browser):
+        """Detach every target of a browser from its common parent category."""
+        browser = str(browser).lower()
+        self.data.setdefault("browser_categories", {}).pop(browser, None)
+        for key, metadata in self.data["targets"].items():
+            if _browser_for_target(key) == browser:
+                metadata.pop("category", None)
+        self._dirty = True
+        self.save(force=True)
+
+    def clear_site_category_for_keys(self, keys):
+        for key in keys:
+            self.data["targets"].setdefault(key, {}).pop("site_category", None)
+        self._dirty = True
+        self.save(force=True)
+
+    def rename_site_category_for_keys(self, keys, category):
+        category = str(category).strip()
+        if not category:
+            return
+        for key in keys:
+            self.data["targets"].setdefault(key, {})["site_category"] = category
+        self._dirty = True
+        self.save(force=True)
+
     def categories(self):
         categories = set(self.data.get("browser_categories", {}).values())
         categories.update(
             metadata.get("category", "")
             for metadata in self.data["targets"].values()
         )
-        return sorted(category for category in categories if category and category != "Autres")
+        categories.update(
+            metadata.get("site_category", "")
+            for metadata in self.data["targets"].values()
+        )
+        return sorted(
+            category for category in categories
+            if category and category != "Applications non classées"
+        )
 
     def presentation(self, usage):
         entries = []
         for key, seconds in usage.items():
             if self.is_excluded(key):
                 continue
+            browser = _browser_for_target(key)
+            if browser and key == f"app:{Path(browser).stem.lower()}":
+                continue
             metadata = self.data["targets"].get(key, {})
             entries.append(
                 UsageEntry(
                     key=key,
                     label=metadata.get("label", _legacy_label(key)),
-                    category=metadata.get("category") or _default_category(key, metadata.get("label", _legacy_label(key))),
+                    category=("__root__" if metadata.get("root") else
+                              metadata.get("category") or _default_category(key, metadata.get("label", _legacy_label(key)))),
                     seconds=float(seconds),
+                    site_category=metadata.get("site_category", ""),
                 )
             )
         return entries
@@ -419,6 +699,7 @@ class UsageTarget:
     key: str
     label: str
     category: str = ""
+    detail_host: str = ""
 
 
 @dataclass(frozen=True)
@@ -427,6 +708,7 @@ class UsageEntry:
     label: str
     category: str
     seconds: float
+    site_category: str = ""
 
 
 def configure_windows_autostart(enabled=True):
@@ -465,9 +747,24 @@ def _startup_command():
     return f'"{interpreter}" "{main_script}" --background'
 
 
-def _display_app_name(app_name):
+def _display_app_name(app_name, window_title=""):
     name = Path(str(app_name).strip()).name
-    return name[:-4] if name.lower().endswith(".exe") else name
+    display_name = name[:-4] if name.lower().endswith(".exe") else name
+    if display_name.lower() == "chrome":
+        chrome_app_name = _chrome_app_name(window_title)
+        if chrome_app_name:
+            return chrome_app_name
+    return display_name
+
+
+def _chrome_app_name(window_title):
+    """Return the installed Chrome web-app name, or an empty string for tabs."""
+    title = str(window_title or "").strip()
+    browser_suffixes = (" - Google Chrome", " – Google Chrome", " - Chrome", " – Chrome")
+    if not title or title.endswith(browser_suffixes):
+        return ""
+    # PWA titles commonly have a document/page subtitle after the app name.
+    return title.split(":", 1)[0].split(" - ", 1)[0].split(" – ", 1)[0].strip()
 
 
 def _site_host(url):
@@ -476,6 +773,26 @@ def _site_host(url):
     except ValueError:
         return ""
     return host.lower().removeprefix("www.")
+
+
+def _is_youtube_host(host):
+    host = str(host).lower()
+    return host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"
+
+
+def _browser_site_parts(key):
+    prefix, separator, host = str(key).lower().partition(":")
+    if prefix != "site" or not separator:
+        return "", ""
+    browser, separator, host = host.partition(":")
+    if not browser or not separator or host == "other-sites":
+        return "", ""
+    return browser, host
+
+
+def _other_sites_browser(key):
+    browser, host = _browser_site_parts(str(key).replace(":other-sites", ":placeholder"))
+    return browser if host == "placeholder" else ""
 
 
 def _browser_label(executable):
@@ -492,7 +809,7 @@ def _default_category(key, label):
     for browser in browser_apps:
         if executable in {browser, Path(browser).stem.lower()}:
             return _browser_label(browser)
-    return "Autres"
+    return "Applications non classées"
 
 
 def _canonical_target_key(key):

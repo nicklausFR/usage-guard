@@ -1,5 +1,6 @@
 import time
 from datetime import date
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -99,7 +100,22 @@ class MonitoringService(QObject):
 
     @staticmethod
     def is_activity_countable(context):
-        return bool(context.app_name and (context.has_recent_input or context.is_video_playing))
+        return bool(
+            context.app_name
+            and (
+                context.has_recent_input
+                or context.is_video_playing
+                or _is_chrome_web_app(context)
+            )
+        )
+
+
+def _is_chrome_web_app(context):
+    """Chrome PWAs are standalone foreground applications, not browser tabs."""
+    executable = Path(str(context.app_name)).name.lower()
+    title = str(context.window_title or "").strip()
+    browser_suffixes = (" - Google Chrome", " – Google Chrome", " - Chrome", " – Chrome")
+    return executable == "chrome.exe" and bool(title) and not title.endswith(browser_suffixes)
 
 
 # Kept as an import-compatible alias for integrations using the old name.

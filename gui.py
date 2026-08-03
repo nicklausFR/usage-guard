@@ -4,14 +4,18 @@ from PySide6.QtCore import QMimeData, QPoint, QTimer, Qt, QSize, Signal
 from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QComboBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSystemTrayIcon,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -23,18 +27,40 @@ class CategoryHeader(QLabel):
     target_dropped = Signal(str)
     drag_started = Signal()
     drag_finished = Signal()
+    clicked = Signal()
 
-    def __init__(self, category, seconds, target_keys=None, nested=False):
+    def __init__(self, category, seconds, target_keys=None, nested=False, indent_level=None,
+                 tree_depth=0, tree_ancestors=()):
         super().__init__(f"{category}    {_format_seconds(seconds)}")
         self.category = category
         self.target_keys = target_keys or []
         self.nested = nested
+        indent_level = (1 if nested else 0) if indent_level is None else indent_level
+        self.tree_depth = tree_depth
+        self.tree_ancestors = tuple(tree_ancestors)
         self._drag_start = QPoint()
         self.setAcceptDrops(True)
         self.setStyleSheet(
             "color: #8fcaff; font-size: 12px; font-weight: bold; padding: "
-            f"8px 4px 1px {22 if nested else 4}px;"
+            f"8px 4px 1px {10 + indent_level * 16}px;"
         )
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        self._paint_tree_lines()
+
+    def _paint_tree_lines(self):
+        if not self.tree_depth:
+            return
+        painter = QPainter(self)
+        painter.setPen(QColor("#74bced"))
+        center_y = self.height() // 2
+        for depth in self.tree_ancestors:
+            x = 10 + (depth - 1) * 16
+            painter.drawLine(x, 0, x, self.height())
+        x = 10 + (self.tree_depth - 1) * 16
+        painter.drawLine(x, 0, x, center_y)
+        painter.drawLine(x, center_y, x + 12, center_y)
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
@@ -62,16 +88,56 @@ class CategoryHeader(QLabel):
         drag.exec(Qt.MoveAction)
         self.drag_finished.emit()
 
+    def mouseReleaseEvent(self, event):
+        if (
+            event.button() == Qt.LeftButton
+            and (event.position().toPoint() - self._drag_start).manhattanLength() < 8
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
 
 class UsageRow(QWidget):
     drag_started = Signal()
     drag_finished = Signal()
+    target_dropped = Signal(str)
+    clicked = Signal()
 
     def __init__(self, target_key):
         super().__init__()
         self.target_key = target_key
         self._drag_start = QPoint()
+        self.tree_depth = 0
+        self.tree_ancestors = ()
         self.setCursor(Qt.OpenHandCursor)
+        self.setAcceptDrops(True)
+
+    def set_tree_branch(self, depth, ancestors=()):
+        self.tree_depth = depth
+        self.tree_ancestors = tuple(ancestors)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.tree_depth:
+            return
+        painter = QPainter(self)
+        painter.setPen(QColor("#74bced"))
+        center_y = self.height() // 2
+        for depth in self.tree_ancestors:
+            x = 10 + (depth - 1) * 16
+            painter.drawLine(x, 0, x, self.height())
+        x = 10 + (self.tree_depth - 1) * 16
+        painter.drawLine(x, 0, x, self.height())
+        painter.drawLine(x, center_y, x + 12, center_y)
+
+    def dragEnterEvent(self, event):
+        source_key = event.mimeData().text()
+        if source_key and not source_key.startswith("group:") and source_key != self.target_key:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        self.target_dropped.emit(event.mimeData().text())
+        event.acceptProposedAction()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -90,6 +156,35 @@ class UsageRow(QWidget):
         self.drag_started.emit()
         drag.exec(Qt.MoveAction)
         self.drag_finished.emit()
+
+    def mouseReleaseEvent(self, event):
+        if (
+            event.button() == Qt.LeftButton
+            and (event.position().toPoint() - self._drag_start).manhattanLength() < 8
+        ):
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
+
+class UsageTree(QTreeWidget):
+    moved_to_root = Signal(str)
+
+    def dragEnterEvent(self, event):
+        event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        source_view = event.source()
+        source = source_view.currentItem() if isinstance(source_view, QTreeWidget) else self.currentItem()
+        if source is not None and source.data(0, Qt.UserRole) == "target":
+            destination = self.itemAt(event.position().toPoint())
+            if destination is None or destination.parent() is None:
+                self.moved_to_root.emit(source.data(0, Qt.UserRole + 1))
+                event.acceptProposedAction()
+                return
+        super().dropEvent(event)
 
 
 def create_usage_icon(active=False):
@@ -145,40 +240,30 @@ class PopupPanel(QWidget):
         super().__init__()
         self.service = service
         self._has_rendered = False
+        self._expanded_other_sites = set()
+        self._collapsed_nodes = set()
+        self._tree_expanded = {}
         self._drag_in_progress = False
         self._refresh_pending = False
         self._drop_refresh_scheduled = False
-        self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setFixedSize(
+        self.setWindowFlags(Qt.Window)
+        self.setWindowTitle("Usage Monitor")
+        self.setWindowIcon(create_usage_icon(True))
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.resize(
             int(getattr(config, "WINDOW_WIDTH", 420)),
             int(getattr(config, "WINDOW_HEIGHT", 520)),
         )
 
         background = QWidget(self)
+        self._background = background
         background.setGeometry(0, 0, self.width(), self.height())
         background.setStyleSheet(
-            "background-color: rgba(38, 38, 42, 242); border-radius: 12px;"
+            "background-color: #26262a;"
         )
         layout = QVBoxLayout(background)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
-
-        title_row = QHBoxLayout()
-        title_icon = QLabel()
-        title_icon.setPixmap(create_usage_icon(True).pixmap(QSize(18, 18)))
-        title = QLabel("Usage Monitor")
-        title.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
-        close_button = QPushButton("×")
-        close_button.setFixedSize(26, 26)
-        close_button.setStyleSheet(_close_style())
-        close_button.clicked.connect(self.close)
-        title_row.addWidget(title_icon)
-        title_row.addSpacing(6)
-        title_row.addWidget(title)
-        title_row.addStretch()
-        title_row.addWidget(close_button)
-        layout.addLayout(title_row)
 
         status_row = QHBoxLayout()
         self.status_label = QLabel()
@@ -211,21 +296,44 @@ class PopupPanel(QWidget):
         )
         layout.addWidget(self.system_widget)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setStyleSheet("QScrollArea { background: transparent; }")
-        self.list_widget = QWidget()
-        self.list_widget.setStyleSheet("background: transparent;")
-        self.apps_layout = QVBoxLayout(self.list_widget)
-        self.apps_layout.setContentsMargins(0, 0, 0, 0)
-        self.apps_layout.setSpacing(7)
-        self.apps_layout.addStretch()
-        scroll.setWidget(self.list_widget)
-        layout.addWidget(scroll, 1)
+        self.tree = UsageTree()
+        self.tree.setColumnCount(2)
+        self.tree.setHeaderHidden(True)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setIndentation(18)
+        self.tree.setAnimated(True)
+        self.tree.setDragEnabled(True)
+        self.tree.setAcceptDrops(True)
+        self.tree.setDropIndicatorShown(True)
+        self.tree.setDragDropMode(QAbstractItemView.DragDrop)
+        self.tree.setDefaultDropAction(Qt.MoveAction)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tree.setTextElideMode(Qt.ElideRight)
+        self.tree.setStyleSheet(
+            "QTreeWidget { background: transparent; border: none; color: white; }"
+            "QTreeWidget::item { min-height: 27px; padding: 2px 4px; }"
+            "QTreeWidget::item:selected { background: rgba(95, 135, 175, 100); }"
+        )
+        self.tree.setColumnWidth(0, 270)
+        self.tree.setColumnWidth(1, 90)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._show_tree_menu)
+        self.tree.itemExpanded.connect(lambda item: self._remember_tree_state(item, True))
+        self.tree.itemCollapsed.connect(lambda item: self._remember_tree_state(item, False))
+        self.tree.moved_to_root.connect(self._move_target_to_root)
+        layout.addWidget(self.tree, 1)
+
+        self.excluded_apps_button = QPushButton("Applications exclues…")
+        self.excluded_apps_button.clicked.connect(self._manage_excluded_apps)
+        self.excluded_apps_button.hide()
 
         self.service.state_changed.connect(self.refresh)
         self.refresh()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_background"):
+            self._background.setGeometry(self.rect())
 
     def refresh(self):
         if self._drag_in_progress:
@@ -239,7 +347,8 @@ class PopupPanel(QWidget):
         if context.is_afk:
             status = "En pause — ordinateur inactif"
         elif context.app_name:
-            status = f"Actif : {_clean_name(context.app_name)}"
+            target = self.service.usage.target_for_context(context)
+            status = f"Actif : {_clean_name(target.label)}"
         else:
             status = "En attente d’une application active"
         self.status_label.setText(status)
@@ -264,7 +373,10 @@ class PopupPanel(QWidget):
         if self.period.currentData() == "today":
             system_on_seconds = computer_on_seconds_today() or system_on_seconds
         self.system_on_label.setText(_format_seconds(system_on_seconds))
-        self.system_foreground_label.setText(_format_seconds(system_usage["foreground"]))
+        # The active total must match the activities shown below exactly.
+        self.system_foreground_label.setText(
+            _format_seconds(sum(entry.seconds for entry in entries))
+        )
         self.system_with_passive_label.setText(
             _format_seconds(sum(passive_usage.values()))
         )
@@ -276,90 +388,172 @@ class PopupPanel(QWidget):
         self.refresh()
 
     def _replace_rows(self, entries, passive_usage):
-        while self.apps_layout.count() > 1:
-            item = self.apps_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                # Removing a layout item does not hide it immediately. Without
-                # this, rapid refreshes leave old labels painted underneath the
-                # new rows.
-                widget.setParent(None)
-                widget.deleteLater()
-        if not entries and not passive_usage:
-            empty = QLabel("Aucune activité enregistrée pour cette période.")
-            empty.setStyleSheet("color: #99999f; padding: 18px 4px;")
-            empty.setWordWrap(True)
-            self.apps_layout.insertWidget(0, empty)
-            return
+        self.tree.blockSignals(True)
+        self.tree.clear()
         grouped = {}
         for entry in entries:
             grouped.setdefault(entry.category, []).append(entry)
-
-        index = 0
-        for category, category_entries in sorted(
-            grouped.items(),
-            key=lambda item: sum(entry.seconds for entry in item[1]),
-            reverse=True,
-        ):
-            category_total = sum(entry.seconds for entry in category_entries)
-            header = CategoryHeader(
-                category, category_total, [entry.key for entry in category_entries]
-            )
-            header.target_dropped.connect(
-                lambda target, destination=category: self._move_to_category(target, destination)
-            )
-            header.drag_started.connect(self._begin_drag)
-            header.drag_finished.connect(self._end_drag)
-            header.setContextMenuPolicy(Qt.CustomContextMenu)
-            header.customContextMenuRequested.connect(
-                lambda position, group=category, group_entries=category_entries, widget=header:
-                self._show_category_menu(
-                    widget.mapToGlobal(position), group, [entry.key for entry in group_entries]
-                )
-            )
-            self.apps_layout.insertWidget(index, header)
-            index += 1
-
-            brave_entries = [entry for entry in category_entries if _is_brave_entry(entry)]
-            other_entries = [entry for entry in category_entries if entry not in brave_entries]
-            if brave_entries:
-                if category.lower() != "brave":
-                    brave_total = sum(entry.seconds for entry in brave_entries)
-                    brave_header = CategoryHeader(
-                        "Brave", brave_total, [entry.key for entry in brave_entries], nested=True
+        for category, category_entries in sorted(grouped.items(), key=lambda item: sum(x.seconds for x in item[1]), reverse=True):
+            if category == "__root__":
+                brave_entries = [entry for entry in category_entries if _is_brave_entry(entry)]
+                for entry in sorted(
+                    (entry for entry in category_entries if entry not in brave_entries),
+                    key=lambda x: x.seconds, reverse=True,
+                ):
+                    self._tree_item(None, entry.label, entry.seconds, "target", entry.key)
+                if brave_entries:
+                    browser = self._tree_item(
+                        None, self.service.usage.browser_label("brave.exe"), sum(entry.seconds for entry in brave_entries),
+                        "browser", "brave.exe"
                     )
-                    brave_header.target_dropped.connect(
-                        lambda target, destination=category: self._move_to_category(target, destination)
+                    direct, grouped_sites, other_sites = [], {}, []
+                    for entry in brave_entries:
+                        if _clean_name(entry.label).lower() == "brave":
+                            continue
+                        if _other_sites_browser(entry.key):
+                            other_sites.append(entry)
+                        elif entry.site_category:
+                            grouped_sites.setdefault(entry.site_category, []).append(entry)
+                        else:
+                            direct.append(entry)
+                    for entry in sorted(direct, key=lambda x: x.seconds, reverse=True):
+                        self._tree_item(browser, entry.label, entry.seconds, "target", entry.key)
+                    for name, site_entries in sorted(grouped_sites.items()):
+                        node = self._tree_item(browser, name, sum(x.seconds for x in site_entries), "site-category", (name, [x.key for x in site_entries]))
+                        for entry in sorted(site_entries, key=lambda x: x.seconds, reverse=True):
+                            self._tree_item(node, entry.label, entry.seconds, "target", entry.key)
+                    for entry in other_sites:
+                        node = self._tree_item(browser, "Autres sites", entry.seconds, "other-sites", entry.key)
+                        for host, seconds in sorted(self.service.usage.other_sites("brave.exe").items(), key=lambda x: x[1], reverse=True):
+                            self._tree_item(node, host, seconds, "other-site", ("brave.exe", host))
+                continue
+            root = self._tree_item(None, category, sum(x.seconds for x in category_entries), "category", [x.key for x in category_entries])
+            brave = [x for x in category_entries if _is_brave_entry(x)]
+            for entry in sorted((x for x in category_entries if x not in brave), key=lambda x: x.seconds, reverse=True):
+                self._tree_item(root, entry.label, entry.seconds, "target", entry.key)
+            if brave:
+                browser = self._tree_item(root, self.service.usage.browser_label("brave.exe"), sum(x.seconds for x in brave), "browser", "brave.exe")
+                site_groups = {}
+                direct_sites = []
+                other_sites = []
+                for entry in brave:
+                    if _clean_name(entry.label).lower() == "brave":
+                        direct_sites.append(
+                            type(entry)(
+                                key=entry.key,
+                                label="Brave (sans site identifié)",
+                                category=entry.category,
+                                seconds=entry.seconds,
+                                site_category="",
+                            )
+                        )
+                    else:
+                        if _other_sites_browser(entry.key):
+                            other_sites.append(entry)
+                        elif entry.site_category:
+                            site_groups.setdefault(entry.site_category, []).append(entry)
+                        else:
+                            direct_sites.append(entry)
+                for entry in sorted(direct_sites, key=lambda x: x.seconds, reverse=True):
+                    self._tree_item(browser, entry.label, entry.seconds, "target", entry.key)
+                for site_category, site_entries in sorted(
+                    site_groups.items(), key=lambda item: sum(x.seconds for x in item[1]), reverse=True
+                ):
+                    parent = self._tree_item(
+                        browser, site_category, sum(x.seconds for x in site_entries),
+                        "site-category", (site_category, [x.key for x in site_entries])
                     )
-                    brave_header.drag_started.connect(self._begin_drag)
-                    brave_header.drag_finished.connect(self._end_drag)
-                    self.apps_layout.insertWidget(index, brave_header)
-                    index += 1
-                for entry in sorted(brave_entries, key=lambda item: item.seconds, reverse=True):
-                    if _clean_name(entry.label).lower() != "brave":
-                        self.apps_layout.insertWidget(index, self._usage_row(entry, indent_level=2))
-                        index += 1
-            for entry in sorted(other_entries, key=lambda item: item.seconds, reverse=True):
-                # Every application is a child of its category. The explicit
-                # indentation makes a moved browser visibly belong to
-                # "Internet" instead of looking like another root entry.
-                row = self._usage_row(entry, indent_level=1)
-                self.apps_layout.insertWidget(index, row)
-                index += 1
-
+                    for entry in sorted(site_entries, key=lambda x: x.seconds, reverse=True):
+                        self._tree_item(parent, entry.label, entry.seconds, "target", entry.key)
+                for entry in sorted(other_sites, key=lambda x: x.seconds, reverse=True):
+                    node = self._tree_item(browser, "Autres sites", entry.seconds, "other-sites", entry.key)
+                    for host, seconds in sorted(self.service.usage.other_sites("brave.exe").items(), key=lambda x: x[1], reverse=True):
+                        self._tree_item(node, host, seconds, "other-site", ("brave.exe", host))
+        excluded_targets = self.service.usage.excluded_targets()
+        if excluded_targets:
+            excluded = self._tree_item(None, "Applications exclues", None, "excluded", None)
+            for target in excluded_targets:
+                self._tree_item(excluded, target.label, None, "excluded-target", target.key)
         if passive_usage:
-            passive_total = sum(passive_usage.values())
-            header = QLabel(f"Lecture passive    {_format_seconds(passive_total)}")
-            header.setStyleSheet(
-                "color: #cbb8ff; font-size: 12px; font-weight: bold; padding: 12px 4px 1px;"
-            )
-            self.apps_layout.insertWidget(index, header)
-            index += 1
-            for media_name, seconds in sorted(
-                passive_usage.items(), key=lambda item: item[1], reverse=True
-            ):
-                self.apps_layout.insertWidget(index, self._passive_row(media_name, seconds))
-                index += 1
+            passive = self._tree_item(None, "Lecture passive", sum(passive_usage.values()), "passive", None)
+            for name, seconds in passive_usage.items():
+                self._tree_item(passive, name, seconds, "passive-item", name)
+        for root_index in range(self.tree.topLevelItemCount()):
+            self._restore_tree_state(self.tree.topLevelItem(root_index))
+        self.tree.blockSignals(False)
+
+    def _tree_item(self, parent, label, seconds, kind, payload):
+        duration = "" if seconds is None else _format_seconds(seconds)
+        item = QTreeWidgetItem(parent if parent is not None else self.tree, [str(label), duration])
+        item.setData(0, Qt.UserRole, kind)
+        item.setData(0, Qt.UserRole + 1, payload)
+        state_key = f"{kind}:{payload}"
+        item.setData(0, Qt.UserRole + 2, state_key)
+        if kind == "target":
+            item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
+        item.setForeground(1, QColor("#27d17f"))
+        if kind in {"category", "browser", "site-category", "other-sites", "passive", "excluded"}:
+            item.setForeground(0, QColor("#8fcaff"))
+        return item
+
+    def _restore_tree_state(self, item):
+        if item.childCount():
+            state_key = item.data(0, Qt.UserRole + 2)
+            kind = item.data(0, Qt.UserRole)
+            item.setExpanded(self._tree_expanded.get(state_key, kind in {"category", "browser"}))
+            for index in range(item.childCount()):
+                self._restore_tree_state(item.child(index))
+
+    def _remember_tree_state(self, item, expanded):
+        state_key = item.data(0, Qt.UserRole + 2)
+        if state_key:
+            self._tree_expanded[state_key] = expanded
+
+    def _move_target_to_root(self, target_key):
+        self.service.usage.make_root(target_key)
+        self.refresh()
+
+    def _show_tree_menu(self, position):
+        item = self.tree.itemAt(position)
+        if item is None:
+            return
+        kind = item.data(0, Qt.UserRole)
+        payload = item.data(0, Qt.UserRole + 1)
+        global_pos = self.tree.viewport().mapToGlobal(position)
+        if kind == "target" or kind == "other-sites":
+            self._show_tree_target_menu(global_pos, payload)
+        elif kind == "other-site":
+            self._show_other_site_menu(global_pos, *payload)
+        elif kind == "browser":
+            self._show_browser_menu(global_pos, payload)
+        elif kind == "site-category":
+            self._show_site_category_menu(global_pos, payload[0], payload[1])
+        elif kind == "category":
+            self._show_category_menu(global_pos, item.text(0), payload)
+        elif kind == "excluded-target":
+            menu = QMenu(self)
+            restore = menu.addAction("Réactiver")
+            if menu.exec(global_pos) == restore:
+                self.service.usage.unexclude(payload)
+                self.refresh()
+
+    def _show_tree_target_menu(self, position, target_key):
+        menu = QMenu(self)
+        root_action = menu.addAction("Sortir de non classé")
+        menu.addSeparator()
+        rename_action = menu.addAction("Renommer l’activité…")
+        category_action = menu.addAction("Ajouter à une catégorie…")
+        exclude_action = menu.addAction("Ne pas comptabiliser")
+        selected = menu.exec(position)
+        if selected == root_action:
+            self._move_target_to_root(target_key)
+        elif selected == rename_action:
+            self._rename_target(target_key)
+        elif selected == category_action:
+            self._choose_category(target_key)
+        elif selected == exclude_action:
+            self.service.usage.exclude(target_key)
+            self.refresh()
 
     @staticmethod
     def _system_duration_row(layout, label):
@@ -373,12 +567,17 @@ class PopupPanel(QWidget):
         layout.addLayout(row)
         return duration
 
-    def _usage_row(self, entry, indent_level=0):
+    def _usage_row(self, entry, indent_level=0, tree_prefix="", tree_depth=0, tree_ancestors=()):
         row = UsageRow(entry.key)
-        row.setStyleSheet("background: rgba(55, 55, 60, 190); border-radius: 6px;")
+        row.set_tree_branch(tree_depth, tree_ancestors)
+        is_other_sites = bool(_other_sites_browser(entry.key))
+        row.setStyleSheet(
+            "background: rgba(64, 55, 80, 210); border: 1px solid #7f6b9d; border-radius: 6px;"
+            if is_other_sites else "background: rgba(55, 55, 60, 190); border-radius: 6px;"
+        )
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(10 + indent_level * 16, 8, 10, 8)
-        name = QLabel(_clean_name(entry.label))
+        name = QLabel(f"{tree_prefix}{_clean_name(entry.label)}")
         name.setStyleSheet("color: white; font-weight: bold;")
         duration = QLabel(_format_seconds(entry.seconds))
         duration.setStyleSheet("color: #27d17f; font-weight: bold;")
@@ -390,9 +589,108 @@ class PopupPanel(QWidget):
                 widget.mapToGlobal(position), target
             )
         )
+        row.target_dropped.connect(
+            lambda source_key, destination_key=entry.key: self._confirm_drag_merge(
+                source_key, destination_key
+            )
+        )
         row.drag_started.connect(self._begin_drag)
         row.drag_finished.connect(self._end_drag)
+        browser = _other_sites_browser(entry.key)
+        if browser:
+            row.clicked.connect(lambda key=entry.key: self._toggle_other_sites(key))
         return row
+
+    def _toggle_other_sites(self, target_key):
+        if target_key in self._expanded_other_sites:
+            self._expanded_other_sites.remove(target_key)
+        else:
+            self._expanded_other_sites.add(target_key)
+        self.refresh()
+
+    def _toggle_node(self, node_key):
+        if node_key in self._collapsed_nodes:
+            self._collapsed_nodes.remove(node_key)
+        else:
+            self._collapsed_nodes.add(node_key)
+        self.refresh()
+
+    def _other_site_detail_row(self, browser, host, seconds, tree_prefix=""):
+        row = UsageRow("")
+        row.set_tree_branch(3, (2,))
+        row.setAcceptDrops(False)
+        row.setToolTip("Clic droit : rendre ce site spécifique")
+        row.setStyleSheet(
+            "background: rgba(48, 48, 53, 190); color: #d8d8dd; "
+            "border-radius: 5px;"
+        )
+        layout = QHBoxLayout(row)
+        # This is a child of the already-indented "Autres sites" row.
+        layout.setContentsMargins(58, 6, 10, 6)
+        name = QLabel(host)
+        name.setStyleSheet("color: #d8d8dd;")
+        duration = QLabel(_format_seconds(seconds))
+        duration.setStyleSheet("color: #d8d8dd;")
+        layout.addWidget(name, 1)
+        layout.addWidget(duration)
+        row.setContextMenuPolicy(Qt.CustomContextMenu)
+        row.customContextMenuRequested.connect(
+            lambda position, widget=row, browser=browser, host=host: self._show_other_site_menu(
+                widget.mapToGlobal(position), browser, host
+            )
+        )
+        return row
+
+    def _show_other_site_menu(self, position, browser, host):
+        menu = QMenu(self)
+        make_specific = menu.addAction("Rendre spécifique")
+        if menu.exec(position) == make_specific:
+            self.service.usage.make_browser_site_specific(browser, host)
+            self.refresh()
+
+    def _show_browser_menu(self, position, browser):
+        menu = QMenu(self)
+        rename_action = menu.addAction("Renommer l’activité…")
+        browser_category = self.service.usage.data.get("browser_categories", {}).get(browser)
+        root_action = (
+            menu.addAction("Sortir de non classé")
+            if browser_category == "Applications non classées" else None
+        )
+        remove_category = (
+            menu.addAction("Retirer de la catégorie")
+            if browser_category and browser_category != "__root__" else None
+        )
+        selected = menu.exec(position)
+        if selected == rename_action:
+            label, accepted = QInputDialog.getText(
+                self, "Renommer l’activité", "Nouveau nom :",
+                text=self.service.usage.browser_label(browser),
+            )
+            if accepted and label.strip():
+                self.service.usage.rename_browser(browser, label)
+                self.refresh()
+        elif root_action is not None and selected == root_action:
+            self.service.usage.make_browser_root(browser)
+            self.refresh()
+        elif remove_category is not None and selected == remove_category:
+            self.service.usage.clear_browser_category(browser)
+            self.refresh()
+
+    def _show_site_category_menu(self, position, category, target_keys):
+        menu = QMenu(self)
+        rename_category = menu.addAction("Renommer la catégorie…")
+        remove_category = menu.addAction("Retirer de la catégorie")
+        selected = menu.exec(position)
+        if selected == rename_category:
+            label, accepted = QInputDialog.getText(
+                self, "Renommer la catégorie", "Nouveau nom :", text=category
+            )
+            if accepted and label.strip():
+                self.service.usage.rename_site_category_for_keys(target_keys, label)
+                self.refresh()
+        elif selected == remove_category:
+            self.service.usage.clear_site_category_for_keys(target_keys)
+            self.refresh()
 
     def _passive_row(self, media_name, seconds):
         row = QWidget()
@@ -450,8 +748,18 @@ class PopupPanel(QWidget):
 
     def _show_category_menu(self, position, category, target_keys):
         menu = QMenu(self)
+        rename_action = menu.addAction("Renommer la catégorie…")
         move_action = menu.addAction(f"Déplacer « {category} » dans une catégorie…")
-        if menu.exec(position) != move_action:
+        remove_action = menu.addAction("Retirer de la catégorie")
+        selected = menu.exec(position)
+        if selected == rename_action:
+            self._rename_category(category)
+            return
+        if selected == remove_action:
+            self.service.usage.set_category_for_keys(target_keys, "")
+            self.refresh()
+            return
+        if selected != move_action:
             return
         categories = self.service.usage.categories()
         parent, accepted = QInputDialog.getItem(
@@ -468,18 +776,123 @@ class PopupPanel(QWidget):
 
     def _show_entry_menu(self, position, target_key):
         menu = QMenu(self)
+        rename_action = menu.addAction("Renommer l’activité…")
         category_action = menu.addAction("Ajouter à une catégorie…")
         remove_category_action = menu.addAction("Retirer de la catégorie")
+        merge_action = menu.addAction("Fusionner dans une autre application…")
+        specific_site_actions = {}
+        browser = _other_sites_browser(target_key)
+        if browser:
+            sites_menu = menu.addMenu("Rendre spécifique")
+            sites = self.service.usage.other_sites(browser)
+            for host, seconds in sorted(sites.items(), key=lambda item: item[1], reverse=True):
+                action = sites_menu.addAction(f"{host} ({_format_seconds(seconds)})")
+                specific_site_actions[action] = host
         menu.addSeparator()
         exclude_action = menu.addAction("Ne pas comptabiliser")
         selected = menu.exec(position)
-        if selected == category_action:
+        if selected == rename_action:
+            self._rename_target(target_key)
+        elif selected == category_action:
             self._choose_category(target_key)
         elif selected == remove_category_action:
             self.service.usage.set_category(target_key, "")
             self.refresh()
+        elif selected == merge_action:
+            self._choose_merge_target(target_key)
+        elif selected in specific_site_actions:
+            self.service.usage.make_browser_site_specific(
+                browser, specific_site_actions[selected]
+            )
+            self.refresh()
         elif selected == exclude_action:
             self.service.usage.exclude(target_key)
+            self.refresh()
+
+    def _rename_target(self, target_key):
+        current_label = self.service.usage.data["targets"].get(
+            target_key, {}
+        ).get("label", target_key)
+        label, accepted = QInputDialog.getText(
+            self,
+            "Renommer l’activité",
+            "Nouveau nom :",
+            text=current_label,
+        )
+        if accepted and label.strip():
+            self.service.usage.rename_target(target_key, label)
+            self.refresh()
+
+    def _rename_category(self, category):
+        label, accepted = QInputDialog.getText(
+            self,
+            "Renommer la catégorie",
+            "Nouveau nom :",
+            text=category,
+        )
+        if accepted and label.strip():
+            self.service.usage.rename_category(category, label)
+            self.refresh()
+
+    def _manage_excluded_apps(self):
+        excluded_targets = self.service.usage.excluded_targets()
+        if not excluded_targets:
+            return
+        labels = [f"{target.label} ({target.key})" for target in excluded_targets]
+        selected_label, accepted = QInputDialog.getItem(
+            self,
+            "Applications non comptabilisées",
+            "Sélectionne une application à réactiver :",
+            labels,
+            0,
+            False,
+        )
+        if accepted:
+            target = excluded_targets[labels.index(selected_label)]
+            self.service.usage.unexclude(target.key)
+            self.refresh()
+
+    def _choose_merge_target(self, source_key):
+        candidates = self.service.usage.merge_candidates(source_key)
+        if not candidates:
+            return
+        labels = [f"{target.label} ({target.key})" for target in candidates]
+        selected_label, accepted = QInputDialog.getItem(
+            self,
+            "Fusionner l’application",
+            "Fusionner toutes les durées dans :",
+            labels,
+            0,
+            False,
+        )
+        if accepted:
+            destination = candidates[labels.index(selected_label)]
+            self.service.usage.merge_target_into(source_key, destination.key)
+            self.refresh()
+
+    def _confirm_drag_merge(self, source_key, destination_key):
+        source = next(
+            (target for target in self.service.usage.merge_candidates(destination_key)
+             if target.key == source_key),
+            None,
+        )
+        destination = next(
+            (target for target in self.service.usage.merge_candidates(source_key)
+             if target.key == destination_key),
+            None,
+        )
+        if source is None or destination is None:
+            return
+        result = QMessageBox.question(
+            self,
+            "Fusionner les applications",
+            f"Fusionner « {source.label} » dans « {destination.label} » ?\n\n"
+            "Toutes les durées de la première seront déplacées vers la seconde.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if result == QMessageBox.Yes:
+            self.service.usage.merge_target_into(source_key, destination_key)
             self.refresh()
 
     def _choose_category(self, target_key):
@@ -505,6 +918,13 @@ def _clean_name(name):
 def _is_brave_entry(entry):
     key = entry.key.lower()
     return key == "app:brave" or key.startswith("site:brave.exe:")
+
+
+def _other_sites_browser(target_key):
+    key = str(target_key).lower()
+    if not key.startswith("site:") or not key.endswith(":other-sites"):
+        return ""
+    return key.removeprefix("site:").removesuffix(":other-sites")
 
 
 def _format_seconds(seconds):
