@@ -13,6 +13,9 @@ limits, quotas, warnings, blocks, passwords, or usage rules.
 - Continue de compter une vidéo en lecture dans l'application au premier plan,
   via les sessions média Windows. Le son seul ne compte jamais.
 - Stores totals per application and per calendar day in `activity.json`.
+  In the compiled Windows executable, this file is kept in
+  `%LOCALAPPDATA%\Usage Monitor\activity.json`, so it survives updates and
+  restarts.
 - Shows today's totals or all-time totals from the system-tray panel.
 - Keeps all activity data locally.
 
@@ -25,6 +28,21 @@ Windows foreground-window API otherwise. ActivityWatch is therefore optional.
 pip install -r requirements.txt
 python main.py
 ```
+
+## Build the `.exe`
+
+```powershell
+pip install pyinstaller
+python build_exe.py
+```
+
+The result is `dist\usage-guard.exe`. The build script bundles `config.yaml`;
+the statistics themselves are deliberately stored outside the executable in
+the per-user folder shown above. On the first build, an existing project
+`activity.json` is copied there automatically, without overwriting a file that
+is already present in the per-user folder. At its first launch, the executable
+also merges an `activity.json` found next to the executable (or in its parent
+folder), so existing project statistics are retained.
 
 The first launch creates this per-user Windows startup entry:
 

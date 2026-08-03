@@ -4,7 +4,7 @@ from datetime import date
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from activity import ActiveContext, ActivityProbe
-from usage_guard import AppUsageStore, config
+from usage_guard import AppUsageStore, config, debug_log
 
 
 class MonitoringService(QObject):
@@ -18,6 +18,7 @@ class MonitoringService(QObject):
         self._last_tick = time.monotonic()
         self._last_save = self._last_tick
         self._current_day = date.today()
+        self._last_debug_snapshot = None
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
         self.timer.setInterval(int(getattr(config, "POLL_INTERVAL_MS", 1000)))
@@ -44,10 +45,52 @@ class MonitoringService(QObject):
             self.usage.save(force=True)
             self._current_day = today
 
-        if self.is_activity_countable(self.current_context):
+        foreground = self.is_activity_countable(self.current_context)
+        # Passive time is media playing outside the foreground application.
+        # It remains passive while the user works in another window.
+        background_media = (
+            []
+            if self.current_context.is_video_playing
+            else self.current_context.background_media or []
+        )
+        passive = bool(background_media)
+        debug_snapshot = (
+            str(self.current_context.app_name),
+            str(self.current_context.window_title),
+            str(self.current_context.url),
+            self.current_context.has_recent_input,
+            self.current_context.browser_media_playing,
+            self.current_context.is_video_playing,
+            foreground,
+            tuple(background_media),
+            tuple(self.probe.media_sources()),
+        )
+        if debug_snapshot != self._last_debug_snapshot:
+            debug_log(
+                "app={!r}; title={!r}; url={!r}; recent_input={}; audible={}; "
+                "video_playing={}; foreground_counted={}; "
+                "background_media={!r}; windows_media_sources={!r}; passive={}".format(
+                    self.current_context.app_name,
+                    self.current_context.window_title,
+                    self.current_context.url,
+                    self.current_context.has_recent_input,
+                    self.current_context.browser_media_playing,
+                    self.current_context.is_video_playing,
+                    foreground,
+                    background_media,
+                    self.probe.media_sources(),
+                    passive,
+                )
+            )
+            self._last_debug_snapshot = debug_snapshot
+        self.usage.add_system_seconds(elapsed, foreground, passive, today)
+
+        if foreground:
             self.usage.add_seconds(
                 self.usage.target_for_context(self.current_context), elapsed, today
             )
+        for media_name in background_media:
+            self.usage.add_passive_seconds(media_name, elapsed, today)
 
         if now - self._last_save >= 10:
             self.usage.save()

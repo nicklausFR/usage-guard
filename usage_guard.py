@@ -2,7 +2,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import datetime, date
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -11,7 +11,24 @@ import yaml
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.yaml"
-USAGE_PATH = APP_DIR / "activity.json"
+APP_NAME = "Usage Monitor"
+
+
+def _usage_path():
+    """Return a location which survives a PyInstaller one-file restart."""
+    if not getattr(sys, "frozen", False):
+        return APP_DIR / "activity.json"
+
+    # In a one-file executable, ``__file__`` is inside PyInstaller's temporary
+    # extraction directory.  It is removed when the application exits, so it
+    # must never be used to hold user data.
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return Path(local_app_data) / APP_NAME / "activity.json"
+    return Path.home() / "AppData" / "Local" / APP_NAME / "activity.json"
+
+
+USAGE_PATH = _usage_path()
 
 
 class Config:
@@ -29,13 +46,85 @@ class Config:
 config = Config()
 
 
+DEBUG_LOG_PATH = (
+    Path(sys.executable).resolve().parent / "usage-guard-debug.log"
+    if getattr(sys, "frozen", False)
+    else APP_DIR / "usage-guard-debug.log"
+)
+
+
+def debug_log(message):
+    """Write diagnostics next to the executable when explicitly enabled."""
+    if not getattr(config, "DEBUG_LOGGING", False):
+        return
+    try:
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as stream:
+            stream.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {message}\n")
+    except OSError:
+        pass
+
+
 class AppUsageStore:
     """Small local store containing active seconds per application and day."""
 
     def __init__(self, path=USAGE_PATH):
         self.path = Path(path)
+        self._import_legacy_activity_file()
         self.data = self._load()
         self._dirty = self._migrate_legacy_targets()
+
+    def _import_legacy_activity_file(self):
+        """Merge project-side activity data when upgrading to a one-file exe."""
+        if not getattr(sys, "frozen", False) or self.path != USAGE_PATH:
+            return
+
+        executable_dir = Path(sys.executable).resolve().parent
+        candidates = (executable_dir / "activity.json", executable_dir.parent / "activity.json")
+        for source in candidates:
+            if not source.exists() or source == self.path:
+                continue
+            source_id = str(source.resolve())
+            try:
+                source_data = json.loads(source.read_text(encoding="utf-8"))
+                if not isinstance(source_data.get("days"), dict):
+                    continue
+                target_data = (
+                    json.loads(self.path.read_text(encoding="utf-8"))
+                    if self.path.exists()
+                    else self._empty_data()
+                )
+                migrated = target_data.setdefault("migrated_sources", [])
+                if source_id in migrated:
+                    continue
+                self._merge_activity_data(target_data, source_data)
+                migrated.append(source_id)
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = self.path.with_suffix(".json.tmp")
+                temporary.write_text(
+                    json.dumps(target_data, ensure_ascii=False, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+                os.replace(temporary, self.path)
+            except (json.JSONDecodeError, OSError, ValueError, AttributeError):
+                continue
+
+    @staticmethod
+    def _merge_activity_data(target, source):
+        for section in ("days", "passive_days", "system_days"):
+            target_section = target.setdefault(section, {})
+            for day, values in source.get(section, {}).items():
+                target_values = target_section.setdefault(day, {})
+                for key, seconds in values.items():
+                    target_values[key] = round(
+                        float(target_values.get(key, 0.0)) + float(seconds), 3
+                    )
+        for key, metadata in source.get("targets", {}).items():
+            target.setdefault("targets", {}).setdefault(key, metadata)
+        target.setdefault("excluded", [])[:0] = list(
+            dict.fromkeys(target.get("excluded", []) + source.get("excluded", []))
+        )
+        for key, category in source.get("browser_categories", {}).items():
+            target.setdefault("browser_categories", {}).setdefault(key, category)
 
     def _load(self):
         if not self.path.exists():
@@ -47,6 +136,8 @@ class AppUsageStore:
             data.setdefault("targets", {})
             data.setdefault("excluded", [])
             data.setdefault("browser_categories", {})
+            data.setdefault("passive_days", {})
+            data.setdefault("system_days", {})
             data["version"] = 2
             return data
         except (json.JSONDecodeError, OSError, ValueError, AttributeError):
@@ -65,6 +156,8 @@ class AppUsageStore:
             "targets": {},
             "excluded": [],
             "browser_categories": {},
+            "passive_days": {},
+            "system_days": {},
         }
 
     def _migrate_legacy_targets(self):
@@ -108,6 +201,14 @@ class AppUsageStore:
             if category and metadata.get("category") != category:
                 metadata["category"] = category
                 changed = True
+        for media in self.data.get("passive_days", {}).values():
+            # Old builds could only identify Brave's media session. The
+            # browser extension now resolves this case as YouTube instead.
+            if "Brave" in media:
+                media["YouTube"] = round(
+                    float(media.get("YouTube", 0.0)) + float(media.pop("Brave")), 3
+                )
+                changed = True
         return changed
 
     def target_for_context(self, context):
@@ -145,6 +246,32 @@ class AppUsageStore:
             metadata["category"] = target.category
         self._dirty = True
 
+    def add_passive_seconds(self, media_name, seconds, when=None):
+        if not media_name or seconds <= 0:
+            return
+        day = (when or date.today()).isoformat()
+        media = self.data["passive_days"].setdefault(day, {})
+        media[media_name] = round(float(media.get(media_name, 0.0)) + seconds, 3)
+        self._dirty = True
+
+    def add_system_seconds(self, seconds, foreground=False, passive=False, when=None):
+        if seconds <= 0:
+            return
+        day = (when or date.today()).isoformat()
+        totals = self.data["system_days"].setdefault(
+            day, {"on": 0.0, "foreground": 0.0, "with_passive": 0.0}
+        )
+        totals["on"] = round(float(totals.get("on", 0.0)) + seconds, 3)
+        if foreground:
+            totals["foreground"] = round(
+                float(totals.get("foreground", 0.0)) + seconds, 3
+            )
+        if foreground or passive:
+            totals["with_passive"] = round(
+                float(totals.get("with_passive", 0.0)) + seconds, 3
+            )
+        self._dirty = True
+
     def is_excluded(self, key):
         return key in self.data["excluded"]
 
@@ -179,6 +306,14 @@ class AppUsageStore:
                 self.data["browser_categories"][browser] = category
         self._dirty = True
         self.save(force=True)
+
+    def categories(self):
+        categories = set(self.data.get("browser_categories", {}).values())
+        categories.update(
+            metadata.get("category", "")
+            for metadata in self.data["targets"].values()
+        )
+        return sorted(category for category in categories if category and category != "Autres")
 
     def presentation(self, usage):
         entries = []
@@ -217,6 +352,32 @@ class AppUsageStore:
         for apps in self.data["days"].values():
             for app_name, seconds in apps.items():
                 totals[app_name] = totals.get(app_name, 0.0) + float(seconds)
+        return totals
+
+    def passive_usage_for_day(self, when=None):
+        day = (when or date.today()).isoformat()
+        return dict(self.data["passive_days"].get(day, {}))
+
+    def total_passive_usage(self):
+        totals = {}
+        for media in self.data["passive_days"].values():
+            for name, seconds in media.items():
+                totals[name] = totals.get(name, 0.0) + float(seconds)
+        return totals
+
+    def system_usage_for_day(self, when=None):
+        day = (when or date.today()).isoformat()
+        return self._system_totals([self.data["system_days"].get(day, {})])
+
+    def total_system_usage(self):
+        return self._system_totals(self.data["system_days"].values())
+
+    @staticmethod
+    def _system_totals(days):
+        totals = {"on": 0.0, "foreground": 0.0, "with_passive": 0.0}
+        for day in days:
+            for key in totals:
+                totals[key] += float(day.get(key, 0.0))
         return totals
 
 

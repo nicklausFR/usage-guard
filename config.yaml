@@ -17,3 +17,6 @@ ACTIVITYWATCH_BASE_URL: http://localhost:5600
 ACTIVITYWATCH_TIMEOUT_SECONDS: 0.1
 ACTIVITYWATCH_AUTOSTART_HEADLESS: true
 ACTIVITYWATCH_INSTALL_DIR: ''
+# Temporary diagnostics: records media detection decisions in
+# dist/usage-guard-debug.log when running the packaged executable.
+DEBUG_LOGGING: true

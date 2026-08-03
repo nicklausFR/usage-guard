@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.error import URLError
 from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
 from usage_guard import config
@@ -18,6 +19,8 @@ class ActiveContext:
     is_afk: bool = False
     has_recent_input: bool = False
     is_video_playing: bool = False
+    background_media: list[str] = None
+    browser_media_playing: bool = False
     idle_seconds: float = 0.0
     source: str = "fallback"
 
@@ -27,6 +30,7 @@ class ActivityProbe:
         self.aw = ActivityWatchProbe()
         self._fallback = WindowsActivityProbe()
         self._media = WindowsMediaProbe()
+        self._last_browser_url = ""
 
     def current(self) -> ActiveContext:
         # GetLastInputInfo is the source of truth for physical keyboard/mouse
@@ -36,6 +40,8 @@ class ActivityProbe:
         if getattr(config, "ACTIVITYWATCH_ENABLED", True):
             context = self.aw.current()
             if context is not None:
+                if context.url:
+                    self._last_browser_url = context.url
                 # The native foreground-window query is sampled in the same
                 # tick. Use it for attribution so a delayed ActivityWatch
                 # event cannot charge the application that was focused just
@@ -53,14 +59,42 @@ class ActivityProbe:
                 context.is_afk = not context.has_recent_input
                 context.is_video_playing = (
                     not context.has_recent_input
-                    and self._media.is_playing_for(context.app_name, context.url)
+                    and (
+                        _is_foreground_browser_video(context)
+                        or (
+                            _is_configured_browser(context.app_name)
+                            and context.browser_media_playing
+                        )
+                        or self._media.is_playing_for(context.app_name, context.url)
+                    )
                 )
+                context.background_media = self._background_media(context)
                 return context
         fallback_context.is_video_playing = (
             not fallback_context.has_recent_input
-            and self._media.is_playing_for(fallback_context.app_name, fallback_context.url)
+            and (
+                _is_foreground_browser_video(fallback_context)
+                or self._media.is_playing_for(fallback_context.app_name, fallback_context.url)
+            )
         )
+        fallback_context.background_media = self._background_media(fallback_context)
         return fallback_context
+
+    def _background_media(self, context):
+        labels = []
+        for source in self._media.playing_sources():
+            if _same_application(context.app_name, source):
+                continue
+            label = _media_label(source, context.url)
+            if label != "Brave":
+                labels.append(label)
+        if context.browser_media_playing and not _is_configured_browser(context.app_name):
+            labels.append(_browser_media_label(self._last_browser_url))
+        return list(dict.fromkeys(labels))
+
+    def media_sources(self):
+        """Raw Windows media-session sources, used only by debug logging."""
+        return self._media.playing_sources()
 
 
 class ActivityWatchProbe:
@@ -87,6 +121,7 @@ class ActivityWatchProbe:
             app_name=str(window_data.get("app", "")),
             window_title=str(web_data.get("title") or window_data.get("title", "")),
             url=str(web_data.get("url") or window_data.get("url", "")),
+            browser_media_playing=bool(web_data.get("audible", False)),
             is_afk=False,
             idle_seconds=0.0,
             source="activitywatch",
@@ -209,17 +244,23 @@ class WindowsMediaProbe:
         self._last_check = 0.0
         self._last_key = None
         self._last_result = False
+        self._last_sources = []
 
     def is_playing_for(self, app_name, url=""):
-        if not self._available or not app_name or not _is_video_context(app_name, url):
+        if not self._available or not app_name:
             return False
-        key = (app_name.lower(), url.lower())
+        if not (_is_video_context(app_name, url) or _is_configured_browser(app_name)):
+            return False
+        return any(_same_application(app_name, source) for source in self.playing_sources())
+
+    def playing_sources(self):
+        if not self._available:
+            return []
         now = time.monotonic()
-        if key == self._last_key and now - self._last_check < 3:
-            return self._last_result
-        self._last_key = key
+        if now - self._last_check < 3:
+            return list(self._last_sources)
         self._last_check = now
-        self._last_result = False
+        self._last_sources = []
         try:
             import asyncio
             from winrt.windows.media.control import (
@@ -231,19 +272,15 @@ class WindowsMediaProbe:
                 manager = await GlobalSystemMediaTransportControlsSessionManager.request_async()
                 return manager.get_sessions()
 
-            for session in asyncio.run(get_sessions()):
-                playback = session.get_playback_info()
-                if (
-                    playback.playback_status
-                    == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
-                    and _same_application(app_name, session.source_app_user_model_id)
-                ):
-                    self._last_result = True
-                    return True
+            self._last_sources = [
+                str(session.source_app_user_model_id)
+                for session in asyncio.run(get_sessions())
+                if session.get_playback_info().playback_status
+                == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
+            ]
         except Exception:
-            # A missing media API/session never makes audio playback count.
-            return False
-        return False
+            pass
+        return list(self._last_sources)
 
 
 def _same_application(app_name, source_app_user_model_id):
@@ -264,6 +301,62 @@ def _is_configured_browser(app_name):
     return executable in {
         str(value).lower() for value in getattr(config, "BROWSER_APPS", ["brave.exe"])
     }
+
+
+def _is_foreground_browser_video(context):
+    is_video = _is_video_context(context.app_name, context.url) or _is_video_title(
+        context.window_title
+    )
+    return (
+        _is_configured_browser(context.app_name) and is_video
+    ) or _is_shelf_video_window(context)
+
+
+def _is_shelf_video_window(context):
+    """Identify YouTube Shelf's foreground popup, reported as explorer.exe."""
+    try:
+        parsed_url = urlparse(str(context.url))
+        if parsed_url.scheme != "chrome-extension":
+            return False
+        query = parse_qs(parsed_url.query)
+        source_url = query.get("sourceUrl", [""])[0]
+        video_title = query.get("title", [""])[0]
+    except ValueError:
+        return False
+    return bool(
+        video_title
+        and video_title.lower() in str(context.window_title).lower()
+        and _is_video_context("brave.exe", source_url)
+    )
+
+
+def _media_label(source, current_url):
+    source_lower = str(source).lower()
+    if "brave" in source_lower or "chrome" in source_lower:
+        if "youtube.com" in str(current_url).lower():
+            return "YouTube"
+        return "Brave" if "brave" in source_lower else "Chrome"
+    if "potplayer" in source_lower:
+        return "PotPlayer"
+    if "vlc" in source_lower:
+        return "VLC"
+    if "spotify" in source_lower:
+        return "Spotify"
+    return "Média"
+
+
+def _browser_media_label(url):
+    try:
+        parsed_url = urlparse(str(url))
+        # YouTube Shelf exposes the video page through its sourceUrl query
+        # parameter. Use that page for the display label, not the extension ID.
+        source_url = parse_qs(parsed_url.query).get("sourceUrl", [str(url)])[0]
+    except ValueError:
+        source_url = str(url)
+    host = (urlparse(source_url).hostname or "").lower().removeprefix("www.")
+    if "youtube.com" in host or "youtu.be" in host:
+        return "YouTube"
+    return host or "Navigateur"
 
 
 def _is_video_context(app_name, url):
@@ -287,6 +380,16 @@ def _is_video_context(app_name, url):
         pattern.lower() in address
         for pattern in getattr(config, "VIDEO_URL_PATTERNS", [])
     )
+
+
+def _is_video_title(title):
+    """Recognize a video page while ActivityWatch's URL is catching up."""
+    title_lower = str(title or "").lower()
+    for pattern in getattr(config, "VIDEO_URL_PATTERNS", []):
+        service = str(pattern).lower().split(".", 1)[0]
+        if service and service in title_lower:
+            return True
+    return False
 
 
 def _event_timestamp(event):

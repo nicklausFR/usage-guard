@@ -192,9 +192,24 @@ class PopupPanel(QWidget):
         status_row.addWidget(self.period)
         layout.addLayout(status_row)
 
-        self.total_label = QLabel()
-        self.total_label.setStyleSheet("color: #27d17f; font-size: 24px; font-weight: bold;")
-        layout.addWidget(self.total_label)
+        self.system_widget = QWidget()
+        self.system_widget.setStyleSheet(
+            "background: rgba(55, 55, 60, 190); border-radius: 6px;"
+        )
+        system_layout = QVBoxLayout(self.system_widget)
+        system_layout.setContentsMargins(10, 8, 10, 8)
+        system_layout.setSpacing(5)
+        system_header = QLabel("Ordinateur")
+        system_header.setStyleSheet("color: #8fcaff; font-size: 12px; font-weight: bold;")
+        system_layout.addWidget(system_header)
+        self.system_on_label = self._system_duration_row(system_layout, "Allumé")
+        self.system_foreground_label = self._system_duration_row(
+            system_layout, "Utilisation active"
+        )
+        self.system_with_passive_label = self._system_duration_row(
+            system_layout, "Utilisation passive"
+        )
+        layout.addWidget(self.system_widget)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -235,15 +250,29 @@ class PopupPanel(QWidget):
             else self.service.usage.total_usage()
         )
         entries = self.service.usage.presentation(usage)
-        self.total_label.setText(f"{_format_seconds(sum(entry.seconds for entry in entries))} au total")
-        self._replace_rows(entries)
+        passive_usage = (
+            self.service.usage.passive_usage_for_day(date.today())
+            if self.period.currentData() == "today"
+            else self.service.usage.total_passive_usage()
+        )
+        system_usage = (
+            self.service.usage.system_usage_for_day(date.today())
+            if self.period.currentData() == "today"
+            else self.service.usage.total_system_usage()
+        )
+        self.system_on_label.setText(_format_seconds(system_usage["on"]))
+        self.system_foreground_label.setText(_format_seconds(system_usage["foreground"]))
+        self.system_with_passive_label.setText(
+            _format_seconds(sum(passive_usage.values()))
+        )
+        self._replace_rows(entries, passive_usage)
         self._has_rendered = True
 
     def showEvent(self, event):
         super().showEvent(event)
         self.refresh()
 
-    def _replace_rows(self, entries):
+    def _replace_rows(self, entries, passive_usage):
         while self.apps_layout.count() > 1:
             item = self.apps_layout.takeAt(0)
             widget = item.widget()
@@ -253,7 +282,7 @@ class PopupPanel(QWidget):
                 # new rows.
                 widget.setParent(None)
                 widget.deleteLater()
-        if not entries:
+        if not entries and not passive_usage:
             empty = QLabel("Aucune activité enregistrée pour cette période.")
             empty.setStyleSheet("color: #99999f; padding: 18px 4px;")
             empty.setWordWrap(True)
@@ -315,6 +344,32 @@ class PopupPanel(QWidget):
                 self.apps_layout.insertWidget(index, row)
                 index += 1
 
+        if passive_usage:
+            passive_total = sum(passive_usage.values())
+            header = QLabel(f"Lecture passive    {_format_seconds(passive_total)}")
+            header.setStyleSheet(
+                "color: #cbb8ff; font-size: 12px; font-weight: bold; padding: 12px 4px 1px;"
+            )
+            self.apps_layout.insertWidget(index, header)
+            index += 1
+            for media_name, seconds in sorted(
+                passive_usage.items(), key=lambda item: item[1], reverse=True
+            ):
+                self.apps_layout.insertWidget(index, self._passive_row(media_name, seconds))
+                index += 1
+
+    @staticmethod
+    def _system_duration_row(layout, label):
+        row = QHBoxLayout()
+        name = QLabel(label)
+        name.setStyleSheet("color: #d8d8dd;")
+        duration = QLabel("0 s")
+        duration.setStyleSheet("color: #27d17f; font-weight: bold;")
+        row.addWidget(name, 1)
+        row.addWidget(duration)
+        layout.addLayout(row)
+        return duration
+
     def _usage_row(self, entry, indent_level=0):
         row = UsageRow(entry.key)
         row.setStyleSheet("background: rgba(55, 55, 60, 190); border-radius: 6px;")
@@ -334,6 +389,19 @@ class PopupPanel(QWidget):
         )
         row.drag_started.connect(self._begin_drag)
         row.drag_finished.connect(self._end_drag)
+        return row
+
+    def _passive_row(self, media_name, seconds):
+        row = QWidget()
+        row.setStyleSheet("background: rgba(68, 56, 88, 190); border-radius: 6px;")
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(26, 8, 10, 8)
+        name = QLabel(str(media_name))
+        name.setStyleSheet("color: white; font-weight: bold;")
+        duration = QLabel(_format_seconds(seconds))
+        duration.setStyleSheet("color: #cbb8ff; font-weight: bold;")
+        layout.addWidget(name, 1)
+        layout.addWidget(duration)
         return row
 
     def _begin_drag(self):
@@ -369,10 +437,14 @@ class PopupPanel(QWidget):
         move_action = menu.addAction(f"Déplacer « {category} » dans une catégorie…")
         if menu.exec(position) != move_action:
             return
-        parent, accepted = QInputDialog.getText(
+        categories = self.service.usage.categories()
+        parent, accepted = QInputDialog.getItem(
             self,
             "Catégorie parente",
             f"Catégorie cible pour « {category} » :",
+            categories,
+            0,
+            True,
         )
         if accepted and parent.strip():
             self.service.usage.set_category_for_keys(target_keys, parent.strip())
@@ -395,10 +467,14 @@ class PopupPanel(QWidget):
             self.refresh()
 
     def _choose_category(self, target_key):
-        category, accepted = QInputDialog.getText(
+        categories = self.service.usage.categories()
+        category, accepted = QInputDialog.getItem(
             self,
             "Catégorie",
-            "Nom de la catégorie :",
+            "Catégorie existante ou nouveau nom :",
+            categories,
+            0,
+            True,
         )
         if accepted and category.strip():
             self.service.usage.set_category(target_key, category)
