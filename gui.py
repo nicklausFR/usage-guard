@@ -402,7 +402,20 @@ class PopupPanel(QWidget):
         duration.setStyleSheet("color: #cbb8ff; font-weight: bold;")
         layout.addWidget(name, 1)
         layout.addWidget(duration)
+        row.setContextMenuPolicy(Qt.CustomContextMenu)
+        row.customContextMenuRequested.connect(
+            lambda position, media_name=media_name, widget=row: self._show_passive_menu(
+                media_name, widget.mapToGlobal(position)
+            )
+        )
         return row
+
+    def _show_passive_menu(self, media_name, position):
+        menu = QMenu(self)
+        exclude_action = menu.addAction("Ne pas comptabiliser dans lecture passive")
+        if menu.exec(position) == exclude_action:
+            self.service.usage.exclude_passive(media_name)
+            self.refresh()
 
     def _begin_drag(self):
         self._drag_in_progress = True

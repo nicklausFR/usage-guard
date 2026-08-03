@@ -137,6 +137,7 @@ class AppUsageStore:
             data.setdefault("excluded", [])
             data.setdefault("browser_categories", {})
             data.setdefault("passive_days", {})
+            data.setdefault("passive_excluded", [])
             data.setdefault("system_days", {})
             data["version"] = 2
             return data
@@ -157,6 +158,7 @@ class AppUsageStore:
             "excluded": [],
             "browser_categories": {},
             "passive_days": {},
+            "passive_excluded": [],
             "system_days": {},
         }
 
@@ -247,12 +249,22 @@ class AppUsageStore:
         self._dirty = True
 
     def add_passive_seconds(self, media_name, seconds, when=None):
-        if not media_name or seconds <= 0:
+        if not media_name or seconds <= 0 or self.is_passive_excluded(media_name):
             return
         day = (when or date.today()).isoformat()
         media = self.data["passive_days"].setdefault(day, {})
         media[media_name] = round(float(media.get(media_name, 0.0)) + seconds, 3)
         self._dirty = True
+
+    def is_passive_excluded(self, media_name):
+        return str(media_name) in self.data.get("passive_excluded", [])
+
+    def exclude_passive(self, media_name):
+        media_name = str(media_name)
+        if media_name and media_name not in self.data["passive_excluded"]:
+            self.data["passive_excluded"].append(media_name)
+            self._dirty = True
+            self.save(force=True)
 
     def add_system_seconds(self, seconds, foreground=False, passive=False, when=None):
         if seconds <= 0:
@@ -356,12 +368,18 @@ class AppUsageStore:
 
     def passive_usage_for_day(self, when=None):
         day = (when or date.today()).isoformat()
-        return dict(self.data["passive_days"].get(day, {}))
+        return {
+            name: seconds
+            for name, seconds in self.data["passive_days"].get(day, {}).items()
+            if not self.is_passive_excluded(name)
+        }
 
     def total_passive_usage(self):
         totals = {}
         for media in self.data["passive_days"].values():
             for name, seconds in media.items():
+                if self.is_passive_excluded(name):
+                    continue
                 totals[name] = totals.get(name, 0.0) + float(seconds)
         return totals
 
