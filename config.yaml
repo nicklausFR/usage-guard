@@ -1,17 +1,19 @@
 POLL_INTERVAL_MS: 1000
-WINDOW_WIDTH: 360
-WINDOW_HEIGHT: 420
-DEFAULT_ACTION: warn
+WINDOW_WIDTH: 420
+WINDOW_HEIGHT: 520
+# L'application au premier plan reste comptée brièvement après une saisie
+# clavier/souris. Une vidéo en lecture est traitée séparément.
+RECENT_INPUT_SECONDS: 3
+# Seuls ces lecteurs, ou ces sites ouverts dans le navigateur au premier plan,
+# peuvent être reconnus comme une vidéo. Cela exclut les lecteurs de musique.
+VIDEO_PLAYER_APPS: [vlc.exe, mpv.exe, potplayermini64.exe, mpc-hc64.exe]
+VIDEO_URL_PATTERNS: [youtube.com, netflix.com, primevideo.com, twitch.tv, vimeo.com, dailymotion.com]
+# Les domaines visités dans Brave sont affichés comme sous-catégories de Brave.
+BROWSER_APPS: [brave.exe]
 AFK_AFTER_SECONDS: 120
+AUTOSTART_WITH_WINDOWS: true
 ACTIVITYWATCH_ENABLED: true
 ACTIVITYWATCH_BASE_URL: http://localhost:5600
-ACTIVITYWATCH_TIMEOUT_SECONDS: 0.25
+ACTIVITYWATCH_TIMEOUT_SECONDS: 0.1
 ACTIVITYWATCH_AUTOSTART_HEADLESS: true
 ACTIVITYWATCH_INSTALL_DIR: ''
-ALLOW_WINDOW_TITLE_SITE_FALLBACK: false
-LOCK_ON_USAGE_RESET: true
-USAGE_STORAGE_INITIALIZED: false
-
-# Prototype default password: usage-guard
-# Replace this hash before using strict mode seriously.
-MASTER_PASSWORD_SHA256: d2ac121fa678578d774d5a4b553990b1e6f692c19387342dd335f0798ad02634

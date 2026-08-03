@@ -1,5 +1,6 @@
 import platform
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.error import URLError
@@ -15,6 +16,8 @@ class ActiveContext:
     window_title: str = ""
     url: str = ""
     is_afk: bool = False
+    has_recent_input: bool = False
+    is_video_playing: bool = False
     idle_seconds: float = 0.0
     source: str = "fallback"
 
@@ -23,19 +26,47 @@ class ActivityProbe:
     def __init__(self):
         self.aw = ActivityWatchProbe()
         self._fallback = WindowsActivityProbe()
+        self._media = WindowsMediaProbe()
 
     def current(self) -> ActiveContext:
+        # GetLastInputInfo is the source of truth for physical keyboard/mouse
+        # activity. ActivityWatch's AFK threshold is independent and can leave
+        # a long tail after the user stops interacting.
+        fallback_context = self._fallback.current()
         if getattr(config, "ACTIVITYWATCH_ENABLED", True):
             context = self.aw.current()
             if context is not None:
+                # The native foreground-window query is sampled in the same
+                # tick. Use it for attribution so a delayed ActivityWatch
+                # event cannot charge the application that was focused just
+                # before an Alt+Tab. Keep the browser URL only when it refers
+                # to that same foreground application.
+                if (
+                    not _application_names_match(context.app_name, fallback_context.app_name)
+                    and not _is_configured_browser(fallback_context.app_name)
+                ):
+                    context.url = ""
+                context.app_name = fallback_context.app_name or context.app_name
+                context.window_title = fallback_context.window_title or context.window_title
+                context.has_recent_input = fallback_context.has_recent_input
+                context.idle_seconds = fallback_context.idle_seconds
+                context.is_afk = not context.has_recent_input
+                context.is_video_playing = (
+                    not context.has_recent_input
+                    and self._media.is_playing_for(context.app_name, context.url)
+                )
                 return context
-        return self._fallback.current()
+        fallback_context.is_video_playing = (
+            not fallback_context.has_recent_input
+            and self._media.is_playing_for(fallback_context.app_name, fallback_context.url)
+        )
+        return fallback_context
 
 
 class ActivityWatchProbe:
     def __init__(self):
         self.base_url = str(getattr(config, "ACTIVITYWATCH_BASE_URL", "http://localhost:5600")).rstrip("/")
-        self.timeout = float(getattr(config, "ACTIVITYWATCH_TIMEOUT_SECONDS", 0.25))
+        self.timeout = float(getattr(config, "ACTIVITYWATCH_TIMEOUT_SECONDS", 0.1))
 
     def current(self):
         try:
@@ -44,23 +75,19 @@ class ActivityWatchProbe:
             return None
 
         window_event = self._latest_event_for_type(buckets, "currentwindow")
-        afk_event = self._latest_event_for_type(buckets, "afkstatus")
         web_event = self._latest_event_for_type(buckets, "web.tab.current")
 
-        if window_event is None and web_event is None and afk_event is None:
+        if window_event is None and web_event is None:
             return None
 
         window_data = (window_event or {}).get("data", {})
-        afk_data = (afk_event or {}).get("data", {})
         web_data = (web_event or {}).get("data", {})
-        status = str(afk_data.get("status", "")).lower()
-        is_afk = status == "afk"
 
         return ActiveContext(
             app_name=str(window_data.get("app", "")),
             window_title=str(web_data.get("title") or window_data.get("title", "")),
             url=str(web_data.get("url") or window_data.get("url", "")),
-            is_afk=is_afk,
+            is_afk=False,
             idle_seconds=0.0,
             source="activitywatch",
         )
@@ -133,6 +160,7 @@ class WindowsActivityProbe:
                 return ActiveContext(
                     window_title=title,
                     is_afk=self._is_afk(idle_seconds),
+                    has_recent_input=self._has_recent_input(idle_seconds),
                     idle_seconds=idle_seconds,
                     source="fallback",
                 )
@@ -145,6 +173,7 @@ class WindowsActivityProbe:
                 app_name=app_name,
                 window_title=title,
                 is_afk=self._is_afk(idle_seconds),
+                has_recent_input=self._has_recent_input(idle_seconds),
                 idle_seconds=idle_seconds,
                 source="fallback",
             )
@@ -167,6 +196,97 @@ class WindowsActivityProbe:
 
     def _is_afk(self, idle_seconds):
         return idle_seconds >= float(getattr(config, "AFK_AFTER_SECONDS", 120))
+
+    def _has_recent_input(self, idle_seconds):
+        return idle_seconds <= float(getattr(config, "RECENT_INPUT_SECONDS", 3))
+
+
+class WindowsMediaProbe:
+    """Checks Windows media sessions without using the audio level as a signal."""
+
+    def __init__(self):
+        self._available = platform.system() == "Windows"
+        self._last_check = 0.0
+        self._last_key = None
+        self._last_result = False
+
+    def is_playing_for(self, app_name, url=""):
+        if not self._available or not app_name or not _is_video_context(app_name, url):
+            return False
+        key = (app_name.lower(), url.lower())
+        now = time.monotonic()
+        if key == self._last_key and now - self._last_check < 3:
+            return self._last_result
+        self._last_key = key
+        self._last_check = now
+        self._last_result = False
+        try:
+            import asyncio
+            from winrt.windows.media.control import (
+                GlobalSystemMediaTransportControlsSessionPlaybackStatus,
+                GlobalSystemMediaTransportControlsSessionManager,
+            )
+
+            async def get_sessions():
+                manager = await GlobalSystemMediaTransportControlsSessionManager.request_async()
+                return manager.get_sessions()
+
+            for session in asyncio.run(get_sessions()):
+                playback = session.get_playback_info()
+                if (
+                    playback.playback_status
+                    == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
+                    and _same_application(app_name, session.source_app_user_model_id)
+                ):
+                    self._last_result = True
+                    return True
+        except Exception:
+            # A missing media API/session never makes audio playback count.
+            return False
+        return False
+
+
+def _same_application(app_name, source_app_user_model_id):
+    executable = app_name.rsplit("\\", 1)[-1].rsplit(".", 1)[0].lower()
+    source = str(source_app_user_model_id or "").lower()
+    return bool(executable and executable in source)
+
+
+def _application_names_match(first, second):
+    def normalized(value):
+        return str(value or "").rsplit("\\", 1)[-1].rsplit(".", 1)[0].lower()
+
+    return bool(normalized(first) and normalized(first) == normalized(second))
+
+
+def _is_configured_browser(app_name):
+    executable = str(app_name or "").rsplit("\\", 1)[-1].lower()
+    return executable in {
+        str(value).lower() for value in getattr(config, "BROWSER_APPS", ["brave.exe"])
+    }
+
+
+def _is_video_context(app_name, url):
+    """Avoid treating a music/podcast session as screen time.
+
+    Windows does not label GSMTC sessions as audio or video. We therefore only
+    accept a configured video-player executable, or a browser tab on a known
+    video host. Both lists are user-configurable for apps/sites not covered by
+    the defaults.
+    """
+    executable = app_name.rsplit("\\", 1)[-1].lower()
+    video_apps = {
+        str(value).lower()
+        for value in getattr(config, "VIDEO_PLAYER_APPS", [])
+    }
+    if executable in video_apps:
+        return True
+
+    address = str(url).lower()
+    return any(
+        pattern.lower() in address
+        for pattern in getattr(config, "VIDEO_URL_PATTERNS", [])
+    )
 
 
 def _event_timestamp(event):

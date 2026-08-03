@@ -1,17 +1,16 @@
-from datetime import datetime
+from datetime import date
 
-from PySide6.QtCore import Qt, QSize, QTimer
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPalette, QPixmap
+from PySide6.QtCore import QMimeData, QPoint, QTimer, Qt, QSize, Signal
+from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMenu,
-    QMessageBox,
     QInputDialog,
+    QLabel,
+    QMenu,
     QPushButton,
-    QProgressBar,
+    QScrollArea,
     QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
@@ -20,49 +19,102 @@ from PySide6.QtWidgets import (
 from usage_guard import config
 
 
-def _windows_uses_light_taskbar():
-    try:
-        import platform
-        import winreg
+class CategoryHeader(QLabel):
+    target_dropped = Signal(str)
+    drag_started = Signal()
+    drag_finished = Signal()
 
-        if platform.system() != "Windows":
-            return None
-        key_path = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path) as key:
-            value, _ = winreg.QueryValueEx(key, "SystemUsesLightTheme")
-            return bool(value)
-    except OSError:
-        return None
+    def __init__(self, category, seconds, target_keys=None, nested=False):
+        super().__init__(f"{category}    {_format_seconds(seconds)}")
+        self.category = category
+        self.target_keys = target_keys or []
+        self.nested = nested
+        self._drag_start = QPoint()
+        self.setAcceptDrops(True)
+        self.setStyleSheet(
+            "color: #8fcaff; font-size: 12px; font-weight: bold; padding: "
+            f"8px 4px 1px {22 if nested else 4}px;"
+        )
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        self.target_dropped.emit(event.mimeData().text())
+        event.acceptProposedAction()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.target_keys:
+            self._drag_start = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self.target_keys or not event.buttons() & Qt.LeftButton:
+            return super().mouseMoveEvent(event)
+        if (event.position().toPoint() - self._drag_start).manhattanLength() < 8:
+            return super().mouseMoveEvent(event)
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        mime_data.setText("group:" + "|".join(self.target_keys))
+        drag.setMimeData(mime_data)
+        self.drag_started.emit()
+        drag.exec(Qt.MoveAction)
+        self.drag_finished.emit()
 
 
-def create_usage_guard_icon(active=False):
+class UsageRow(QWidget):
+    drag_started = Signal()
+    drag_finished = Signal()
+
+    def __init__(self, target_key):
+        super().__init__()
+        self.target_key = target_key
+        self._drag_start = QPoint()
+        self.setCursor(Qt.OpenHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_start = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not event.buttons() & Qt.LeftButton:
+            return super().mouseMoveEvent(event)
+        if (event.position().toPoint() - self._drag_start).manhattanLength() < 8:
+            return super().mouseMoveEvent(event)
+        drag = QDrag(self)
+        mime_data = QMimeData()
+        mime_data.setText(self.target_key)
+        drag.setMimeData(mime_data)
+        self.drag_started.emit()
+        drag.exec(Qt.MoveAction)
+        self.drag_finished.emit()
+
+
+def create_usage_icon(active=False):
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-
-    base = QColor("#00aaff" if not active else "#ff5c5c")
-    painter.setBrush(base)
+    painter.setBrush(QColor("#27d17f" if active else "#00aaff"))
     painter.setPen(Qt.NoPen)
     painter.drawRoundedRect(10, 8, 44, 48, 10, 10)
-
     painter.setBrush(QColor(45, 45, 45))
     painter.drawRoundedRect(18, 18, 28, 24, 5, 5)
     painter.setBrush(QColor(245, 245, 245))
     painter.drawRect(25, 42, 14, 5)
     painter.drawRect(21, 48, 22, 4)
-
     painter.end()
     return QIcon(pixmap)
 
 
 def create_tray_icon(toggle_callback, service):
     app = QApplication.instance()
-    icon = QSystemTrayIcon(create_usage_guard_icon(), app)
-    icon.setToolTip("Usage-Guard")
-
+    icon = QSystemTrayIcon(create_usage_icon(), app)
+    icon.setToolTip("Usage Monitor — suivi actif")
     menu = QMenu()
-    open_action = QAction("Open Usage-Guard", icon)
+    open_action = QAction("Ouvrir Usage Monitor", icon)
     open_action.triggered.connect(toggle_callback)
 
     def quit_app():
@@ -75,20 +127,15 @@ def create_tray_icon(toggle_callback, service):
     menu.addSeparator()
     menu.addAction(quit_action)
     icon.setContextMenu(menu)
-    icon._menu = menu
-    icon._open_action = open_action
-    icon._quit_action = quit_action
     icon.activated.connect(
         lambda reason: toggle_callback()
         if reason == QSystemTrayIcon.ActivationReason.Trigger
         else None
     )
-
-    def refresh_icon(violation=""):
-        icon.setIcon(create_usage_guard_icon(active=bool(violation)))
-        icon.setToolTip(violation or "Usage-Guard")
-
-    service.violation_changed.connect(refresh_icon)
+    # Keep Python references alive for the lifetime of the tray icon.
+    icon._menu = menu
+    icon._open_action = open_action
+    icon._quit_action = quit_action
     icon.show()
     return icon
 
@@ -97,317 +144,303 @@ class PopupPanel(QWidget):
     def __init__(self, service):
         super().__init__()
         self.service = service
-        self._activity_phase = 0
-        self._rule_widgets = {}
+        self._has_rendered = False
+        self._drag_in_progress = False
+        self._refresh_pending = False
+        self._drop_refresh_scheduled = False
         self.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setFixedSize(
-            int(getattr(config, "WINDOW_WIDTH", 360)),
-            int(getattr(config, "WINDOW_HEIGHT", 420)),
+            int(getattr(config, "WINDOW_WIDTH", 420)),
+            int(getattr(config, "WINDOW_HEIGHT", 520)),
         )
 
-        self.bg = QWidget(self)
-        self.bg.setStyleSheet("background-color: rgba(45, 45, 45, 230); border-radius: 12px;")
-        self.bg.setGeometry(0, 0, self.width(), self.height())
-
-        layout = QVBoxLayout(self.bg)
+        background = QWidget(self)
+        background.setGeometry(0, 0, self.width(), self.height())
+        background.setStyleSheet(
+            "background-color: rgba(38, 38, 42, 242); border-radius: 12px;"
+        )
+        layout = QVBoxLayout(background)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
         title_row = QHBoxLayout()
         title_icon = QLabel()
-        title_icon.setPixmap(create_usage_guard_icon().pixmap(QSize(16, 16)))
-        title = QLabel("Usage-Guard")
-        title.setStyleSheet("color: white; font-weight: bold;")
+        title_icon.setPixmap(create_usage_icon(True).pixmap(QSize(18, 18)))
+        title = QLabel("Usage Monitor")
+        title.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
+        close_button = QPushButton("×")
+        close_button.setFixedSize(26, 26)
+        close_button.setStyleSheet(_close_style())
+        close_button.clicked.connect(self.close)
         title_row.addWidget(title_icon)
         title_row.addSpacing(6)
         title_row.addWidget(title)
         title_row.addStretch()
-
-        close_button = QPushButton("x")
-        close_button.setFixedSize(24, 24)
-        close_button.setStyleSheet("""
-            QPushButton {
-                background: transparent;
-                color: white;
-                border: none;
-                font-size: 14px;
-            }
-            QPushButton:hover {
-                color: #ff5c5c;
-            }
-        """)
-        close_button.clicked.connect(self.close)
         title_row.addWidget(close_button)
         layout.addLayout(title_row)
 
-        self.violation_label = QLabel()
-        self.violation_label.setStyleSheet("color: #ffd166; font-weight: bold;")
-        self.violation_label.setWordWrap(True)
-        layout.addWidget(self.violation_label)
+        status_row = QHBoxLayout()
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("color: #b8b8bd;")
+        self.period = QComboBox()
+        self.period.addItem("Aujourd’hui", "today")
+        self.period.addItem("Depuis le début", "all")
+        self.period.setStyleSheet(_combo_style())
+        self.period.currentIndexChanged.connect(self.refresh)
+        status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.period)
+        layout.addLayout(status_row)
 
-        self.rules_layout = QVBoxLayout()
-        self.rules_layout.setSpacing(10)
-        layout.addLayout(self.rules_layout)
+        self.total_label = QLabel()
+        self.total_label.setStyleSheet("color: #27d17f; font-size: 24px; font-weight: bold;")
+        layout.addWidget(self.total_label)
 
-        self.reset_label = QLabel()
-        self.reset_label.setStyleSheet("color: #ff8a8a;")
-        self.reset_label.setWordWrap(True)
-        layout.addWidget(self.reset_label)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        self.list_widget = QWidget()
+        self.list_widget.setStyleSheet("background: transparent;")
+        self.apps_layout = QVBoxLayout(self.list_widget)
+        self.apps_layout.setContentsMargins(0, 0, 0, 0)
+        self.apps_layout.setSpacing(7)
+        self.apps_layout.addStretch()
+        scroll.setWidget(self.list_widget)
+        layout.addWidget(scroll, 1)
 
-        bottom_row = QHBoxLayout()
-        reload_button = QPushButton("Reload")
-        reload_button.setFixedHeight(26)
-        reload_button.setStyleSheet(_button_style())
-        reload_button.clicked.connect(self.reload_rules)
-        unlock_button = QPushButton("Unlock")
-        unlock_button.setFixedHeight(26)
-        unlock_button.setStyleSheet(_button_style())
-        unlock_button.clicked.connect(self.unlock)
-        joker_button = QPushButton("Joker +10m")
-        joker_button.setFixedHeight(26)
-        joker_button.setStyleSheet(_button_style())
-        joker_button.clicked.connect(lambda: self.grant_joker(10))
-        bottom_row.addWidget(reload_button)
-        bottom_row.addWidget(unlock_button)
-        bottom_row.addWidget(joker_button)
-        bottom_row.addStretch()
-        layout.addLayout(bottom_row)
-
-        self._rebuild_rule_list()
         self.service.state_changed.connect(self.refresh)
-        self.activity_timer = QTimer(self)
-        self.activity_timer.timeout.connect(self._advance_activity_phase)
-        self.activity_timer.start(1000)
-        QTimer.singleShot(0, self.refresh)
+        self.refresh()
 
-    def _rebuild_rule_list(self):
-        while self.rules_layout.count():
-            item = self.rules_layout.takeAt(0)
+    def refresh(self):
+        if self._drag_in_progress:
+            self._refresh_pending = True
+            return
+        # The monitoring timer keeps running while the popup is closed. Do not
+        # rebuild its widgets in the background on every tick.
+        if self._has_rendered and not self.isVisible():
+            return
+        context = self.service.current_context
+        if context.is_afk:
+            status = "En pause — ordinateur inactif"
+        elif context.app_name:
+            status = f"Actif : {_clean_name(context.app_name)}"
+        else:
+            status = "En attente d’une application active"
+        self.status_label.setText(status)
+
+        usage = (
+            self.service.usage.usage_for_day(date.today())
+            if self.period.currentData() == "today"
+            else self.service.usage.total_usage()
+        )
+        entries = self.service.usage.presentation(usage)
+        self.total_label.setText(f"{_format_seconds(sum(entry.seconds for entry in entries))} au total")
+        self._replace_rows(entries)
+        self._has_rendered = True
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.refresh()
+
+    def _replace_rows(self, entries):
+        while self.apps_layout.count() > 1:
+            item = self.apps_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                # Removing a layout item does not hide it immediately. Without
+                # this, rapid refreshes leave old labels painted underneath the
+                # new rows.
+                widget.setParent(None)
                 widget.deleteLater()
-        self._rule_widgets = {}
-        for rule in self.service.rules.rules:
-            self._rule_widgets[rule.name] = self._create_rule_row(rule)
-
-    def reload_rules(self):
-        self.service.rules.load()
-        self._rebuild_rule_list()
-        self.refresh()
-
-    def unlock(self):
-        password, ok = QInputDialog.getText(
-            self,
-            "Usage-Guard",
-            "Master password",
-            echo=QLineEdit.EchoMode.Password,
-        )
-        if not ok:
+        if not entries:
+            empty = QLabel("Aucune activité enregistrée pour cette période.")
+            empty.setStyleSheet("color: #99999f; padding: 18px 4px;")
+            empty.setWordWrap(True)
+            self.apps_layout.insertWidget(0, empty)
             return
-        if not self.service.unlock_with_master_password(password):
-            QMessageBox.warning(self, "Usage-Guard", "Invalid master password.")
+        grouped = {}
+        for entry in entries:
+            grouped.setdefault(entry.category, []).append(entry)
 
-    def grant_joker(self, minutes):
-        rule = self._first_active_rule() or self._first_rule()
-        if rule is None:
-            return
-        self.service.grant_joker(rule, minutes)
-        self.refresh()
-
-    def toggle_rule(self, rule):
-        rule.enabled = not rule.enabled
-        self.service.rules.save()
-        self.refresh()
-
-    def _advance_activity_phase(self):
-        self._activity_phase = (self._activity_phase + 1) % 2
-        if self.isVisible():
-            self.refresh(light=True)
-
-    def refresh(self, light=False):
-        now = datetime.now().astimezone()
-        context = self.service.current_context
-        if not light:
-            self.violation_label.setText(self.service.current_violation or "No active limit reached")
-            self.reset_label.setText(
-                "Usage storage was missing at startup. Master password required."
-                if self.service.locked
-                else ""
+        index = 0
+        for category, category_entries in sorted(
+            grouped.items(),
+            key=lambda item: sum(entry.seconds for entry in item[1]),
+            reverse=True,
+        ):
+            category_total = sum(entry.seconds for entry in category_entries)
+            header = CategoryHeader(
+                category, category_total, [entry.key for entry in category_entries]
             )
-        for rule in self.service.rules.rules:
-            self._update_rule_row(rule, context, now)
+            header.target_dropped.connect(
+                lambda target, destination=category: self._move_to_category(target, destination)
+            )
+            header.drag_started.connect(self._begin_drag)
+            header.drag_finished.connect(self._end_drag)
+            header.setContextMenuPolicy(Qt.CustomContextMenu)
+            header.customContextMenuRequested.connect(
+                lambda position, group=category, group_entries=category_entries, widget=header:
+                self._show_category_menu(
+                    widget.mapToGlobal(position), group, [entry.key for entry in group_entries]
+                )
+            )
+            self.apps_layout.insertWidget(index, header)
+            index += 1
 
-    def _create_rule_row(self, rule):
-        row = QWidget()
-        row.setStyleSheet("background: rgba(35, 35, 35, 180); border-radius: 6px;")
-        outer = QVBoxLayout(row)
-        outer.setContentsMargins(8, 8, 8, 8)
-        outer.setSpacing(6)
+            brave_entries = [entry for entry in category_entries if _is_brave_entry(entry)]
+            other_entries = [entry for entry in category_entries if entry not in brave_entries]
+            if brave_entries:
+                if category.lower() != "brave":
+                    brave_total = sum(entry.seconds for entry in brave_entries)
+                    brave_header = CategoryHeader(
+                        "Brave", brave_total, [entry.key for entry in brave_entries], nested=True
+                    )
+                    brave_header.target_dropped.connect(
+                        lambda target, destination=category: self._move_to_category(target, destination)
+                    )
+                    brave_header.drag_started.connect(self._begin_drag)
+                    brave_header.drag_finished.connect(self._end_drag)
+                    self.apps_layout.insertWidget(index, brave_header)
+                    index += 1
+                for entry in sorted(brave_entries, key=lambda item: item.seconds, reverse=True):
+                    if _clean_name(entry.label).lower() != "brave":
+                        self.apps_layout.insertWidget(index, self._usage_row(entry, indent_level=2))
+                        index += 1
+            for entry in sorted(other_entries, key=lambda item: item.seconds, reverse=True):
+                # Every application is a child of its category. The explicit
+                # indentation makes a moved browser visibly belong to
+                # "Internet" instead of looking like another root entry.
+                row = self._usage_row(entry, indent_level=1)
+                self.apps_layout.insertWidget(index, row)
+                index += 1
 
-        header = QHBoxLayout()
-        name_label = QLabel(rule.name)
-        name_label.setStyleSheet("color: white; font-weight: bold;")
-        toggle = QPushButton("On" if rule.enabled else "Off")
-        toggle.setCheckable(True)
-        toggle.setChecked(rule.enabled)
-        toggle.setFixedSize(42, 24)
-        toggle.setStyleSheet(_toggle_style(rule.enabled))
-        toggle.clicked.connect(lambda _checked=False, r=rule: self.toggle_rule(r))
-        header.addWidget(name_label, 1)
-        header.addWidget(toggle)
-        outer.addLayout(header)
-
-        quota_layout = QVBoxLayout()
-        quota_layout.setSpacing(5)
-        outer.addLayout(quota_layout)
-        widgets = {
-            "row": row,
-            "toggle": toggle,
-            "quotas": {},
-        }
-        if rule.quotas:
-            for quota in rule.quotas:
-                widgets["quotas"][quota.period] = self._create_quota_widgets(quota_layout)
-        else:
-            label = QLabel("No quota")
-            label.setStyleSheet("color: #d6d6d6;")
-            quota_layout.addWidget(label)
-        self.rules_layout.addWidget(row)
-        return widgets
-
-    def _create_quota_widgets(self, layout):
-        label = QLabel()
-        label.setStyleSheet("color: #e6e6e6;")
-        layout.addWidget(label)
-
-        bar = QProgressBar()
-        bar.setRange(0, 1000)
-        bar.setTextVisible(True)
-        bar.setFixedHeight(14)
-        bar.setStyleSheet(_progress_style("idle"))
-        layout.addWidget(bar)
-        return {"label": label, "bar": bar}
-
-    def _update_rule_row(self, rule, context, now):
-        widgets = self._rule_widgets.get(rule.name)
-        if widgets is None:
-            return
-        rule_active = (
-            rule.enabled
-            and self.service._rule_matches(rule, context)
-            and self.service.is_activity_countable(context)
-            and not self.service.locked
+    def _usage_row(self, entry, indent_level=0):
+        row = UsageRow(entry.key)
+        row.setStyleSheet("background: rgba(55, 55, 60, 190); border-radius: 6px;")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(10 + indent_level * 16, 8, 10, 8)
+        name = QLabel(_clean_name(entry.label))
+        name.setStyleSheet("color: white; font-weight: bold;")
+        duration = QLabel(_format_seconds(entry.seconds))
+        duration.setStyleSheet("color: #27d17f; font-weight: bold;")
+        row_layout.addWidget(name, 1)
+        row_layout.addWidget(duration)
+        row.setContextMenuPolicy(Qt.CustomContextMenu)
+        row.customContextMenuRequested.connect(
+            lambda position, target=entry.key, widget=row: self._show_entry_menu(
+                widget.mapToGlobal(position), target
+            )
         )
-        widgets["toggle"].setChecked(rule.enabled)
-        widgets["toggle"].setText("On" if rule.enabled else "Off")
-        widgets["toggle"].setStyleSheet(_toggle_style(rule.enabled, active=rule_active))
-        quota_exceeded = False
-        for quota in rule.quotas:
-            quota_widgets = widgets["quotas"].get(quota.period)
-            if quota_widgets is None:
-                continue
-            used = self.service.usage.seconds_for(rule.target_type, rule.target, quota.period, now)
-            limit = max(1, quota.limit_minutes * 60)
-            percent = min(100.0, used / limit * 100)
-            progress_value = min(1000, max(0, round(percent * 10)))
-            quota_exceeded = quota_exceeded or used >= limit
-            quota_widgets["label"].setText(f"{quota.period}: {_format_seconds(used)} / {_format_seconds(limit)}")
-            quota_widgets["bar"].setValue(progress_value)
-            quota_widgets["bar"].setFormat(_format_percent(percent))
-            bar_state = "exceeded" if used >= limit else ("active" if rule_active else "idle")
-            quota_widgets["bar"].setStyleSheet(_progress_style(bar_state))
+        row.drag_started.connect(self._begin_drag)
+        row.drag_finished.connect(self._end_drag)
+        return row
 
-    def _first_active_rule(self):
-        context = self.service.current_context
-        for rule in self.service.rules.rules:
-            if (
-                rule.enabled
-                and self.service._rule_matches(rule, context)
-                and self.service.is_activity_countable(context)
-                and not self.service.locked
-            ):
-                return rule
-        return None
+    def _begin_drag(self):
+        self._drag_in_progress = True
 
-    def _first_rule(self):
-        return self.service.rules.rules[0] if self.service.rules.rules else None
+    def _end_drag(self):
+        self._drag_in_progress = False
+        self._refresh_pending = False
+        self.refresh()
+
+    def _move_to_category(self, target_key, category):
+        if target_key.startswith("group:"):
+            self.service.usage.set_category_for_keys(target_key[6:].split("|"), category)
+        else:
+            self.service.usage.set_category(target_key, category)
+        self._schedule_drop_refresh()
+
+    def _schedule_drop_refresh(self):
+        if self._drop_refresh_scheduled:
+            return
+        self._drop_refresh_scheduled = True
+        QTimer.singleShot(50, self._finish_drop_refresh)
+
+    def _finish_drop_refresh(self):
+        if self._drag_in_progress:
+            QTimer.singleShot(50, self._finish_drop_refresh)
+            return
+        self._drop_refresh_scheduled = False
+        self.refresh()
+
+    def _show_category_menu(self, position, category, target_keys):
+        menu = QMenu(self)
+        move_action = menu.addAction(f"Déplacer « {category} » dans une catégorie…")
+        if menu.exec(position) != move_action:
+            return
+        parent, accepted = QInputDialog.getText(
+            self,
+            "Catégorie parente",
+            f"Catégorie cible pour « {category} » :",
+        )
+        if accepted and parent.strip():
+            self.service.usage.set_category_for_keys(target_keys, parent.strip())
+            self.refresh()
+
+    def _show_entry_menu(self, position, target_key):
+        menu = QMenu(self)
+        category_action = menu.addAction("Ajouter à une catégorie…")
+        remove_category_action = menu.addAction("Retirer de la catégorie")
+        menu.addSeparator()
+        exclude_action = menu.addAction("Ne pas comptabiliser")
+        selected = menu.exec(position)
+        if selected == category_action:
+            self._choose_category(target_key)
+        elif selected == remove_category_action:
+            self.service.usage.set_category(target_key, "")
+            self.refresh()
+        elif selected == exclude_action:
+            self.service.usage.exclude(target_key)
+            self.refresh()
+
+    def _choose_category(self, target_key):
+        category, accepted = QInputDialog.getText(
+            self,
+            "Catégorie",
+            "Nom de la catégorie :",
+        )
+        if accepted and category.strip():
+            self.service.usage.set_category(target_key, category)
+            self.refresh()
 
 
-def _progress_style(state="idle"):
-    if state == "exceeded":
-        chunk = "#ff5c5c"
-    elif state == "active":
-        chunk = "#ffd166"
-    else:
-        chunk = "#27d17f"
-    return f"""
-            QProgressBar {{
-                background: #5a5a5a;
-                border: 1px solid #3f3f3f;
-                border-radius: 6px;
-                color: white;
-                font-size: 9px;
-                text-align: center;
-            }}
-            QProgressBar::chunk {{
-                background: {chunk};
-                border-radius: 6px;
-                margin: 1px;
-            }}
-        """
+def _clean_name(name):
+    text = str(name).strip()
+    return text[:-4] if text.lower().endswith(".exe") else text
+
+
+def _is_brave_entry(entry):
+    key = entry.key.lower()
+    return key == "app:brave" or key.startswith("site:brave.exe:")
 
 
 def _format_seconds(seconds):
-    minutes = int(seconds // 60)
-    hours = minutes // 60
-    remaining = minutes % 60
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
     if hours:
-        return f"{hours}h{remaining:02d}"
-    return f"{remaining}m"
+        return f"{hours} h {minutes:02d} min"
+    if minutes:
+        return f"{minutes} min {secs:02d} s"
+    return f"{secs} s"
 
 
-def _format_percent(percent):
-    if 0 < percent < 0.1:
-        return "<0.1%"
-    if percent < 10:
-        return f"{percent:.1f}%"
-    return f"{round(percent)}%"
-
-
-def _button_style():
+def _close_style():
     return """
-        QPushButton {
-            color: white;
-            background: #333;
-            border: none;
-            border-radius: 4px;
-            padding: 2px 8px;
-        }
-        QPushButton:pressed {
-            background-color: #2d8cf0;
-        }
+        QPushButton { color: white; background: transparent; border: none; font-size: 20px; }
+        QPushButton:hover { color: #ff6b6b; }
     """
 
 
-def _toggle_style(enabled, active=False):
-    if active:
-        bg = "#ffd166"
-        hover = "#ffe08a"
-        text = "#111"
-    else:
-        bg = "#27d17f"
-        hover = "#34e892"
-        text = "#111"
-    return f"""
-        QPushButton {{
-            color: {text};
-            background: {bg};
-            border: none;
-            border-radius: 4px;
-            font-weight: bold;
-        }}
-        QPushButton:hover {{
-            background: {hover};
-        }}
+def _combo_style():
+    return """
+        QComboBox { color: white; background: #39393e; border: none;
+                    border-radius: 4px; padding: 5px 8px; }
+        QComboBox QAbstractItemView { color: white; background: #39393e;
+                                     selection-background-color: #1679b8; }
     """
+
+
+# Compatibility for callers using the former function name.
+create_usage_guard_icon = create_usage_icon

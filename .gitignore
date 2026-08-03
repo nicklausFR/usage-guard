@@ -9,6 +9,8 @@ dist/
 usage.dat
 usage.bak.dat
 jokers.json
+activity.json
+activity.json.tmp
 *.corrupt
 
 .vscode/
