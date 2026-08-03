@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from usage_guard import config
+from usage_guard import computer_on_seconds_today, config
 
 
 class CategoryHeader(QLabel):
@@ -260,7 +260,10 @@ class PopupPanel(QWidget):
             if self.period.currentData() == "today"
             else self.service.usage.total_system_usage()
         )
-        self.system_on_label.setText(_format_seconds(system_usage["on"]))
+        system_on_seconds = system_usage["on"]
+        if self.period.currentData() == "today":
+            system_on_seconds = computer_on_seconds_today() or system_on_seconds
+        self.system_on_label.setText(_format_seconds(system_on_seconds))
         self.system_foreground_label.setText(_format_seconds(system_usage["foreground"]))
         self.system_with_passive_label.setText(
             _format_seconds(sum(passive_usage.values()))

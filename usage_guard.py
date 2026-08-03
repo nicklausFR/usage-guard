@@ -46,6 +46,21 @@ class Config:
 config = Config()
 
 
+def computer_on_seconds_today():
+    """Return today's Windows uptime, independently of this app's start time."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        uptime_seconds = ctypes.windll.kernel32.GetTickCount64() / 1000.0
+        now = datetime.now()
+        start_of_day = datetime.combine(now.date(), datetime.min.time())
+        return min(uptime_seconds, (now - start_of_day).total_seconds())
+    except (AttributeError, OSError):
+        return None
+
+
 DEBUG_LOG_PATH = (
     Path(sys.executable).resolve().parent / "usage-guard-debug.log"
     if getattr(sys, "frozen", False)
