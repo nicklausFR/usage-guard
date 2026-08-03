@@ -1,7 +1,7 @@
 import platform
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from urllib.error import URLError
 from urllib.parse import urlencode
@@ -15,6 +15,7 @@ from usage_guard import config
 class ActiveContext:
     app_name: str = ""
     window_title: str = ""
+    window_handle: int = 0
     url: str = ""
     is_afk: bool = False
     has_recent_input: bool = False
@@ -31,6 +32,7 @@ class ActivityProbe:
         self._fallback = WindowsActivityProbe()
         self._media = WindowsMediaProbe()
         self._last_browser_url = ""
+        self._last_non_guard_context = None
 
     def current(self) -> ActiveContext:
         # GetLastInputInfo is the source of truth for physical keyboard/mouse
@@ -42,18 +44,41 @@ class ActivityProbe:
             if context is not None:
                 if context.url:
                     self._last_browser_url = context.url
+                shelf_source_url = _shelf_source_url(context.url)
+                if (
+                    not shelf_source_url
+                    and _is_shelf_popup_app(fallback_context.app_name)
+                    and context.browser_media_playing
+                    and _is_video_context(_default_browser_app(), context.url)
+                ):
+                    # Depending on the Shelf version, ActivityWatch may
+                    # already expose the YouTube URL instead of the extension
+                    # URL.  The native popup is still explorer.exe in both
+                    # cases, so retain that video page for attribution.
+                    shelf_source_url = context.url
                 # The native foreground-window query is sampled in the same
                 # tick. Use it for attribution so a delayed ActivityWatch
                 # event cannot charge the application that was focused just
                 # before an Alt+Tab. Keep the browser URL only when it refers
-                # to that same foreground application.
+                # to that same foreground application.  YouTube Shelf is an
+                # exception: its popup is owned by explorer.exe, while the
+                # extension event carries the actual video URL in sourceUrl.
                 if (
                     not _application_names_match(context.app_name, fallback_context.app_name)
                     and not _is_configured_browser(fallback_context.app_name)
+                    and not shelf_source_url
                 ):
                     context.url = ""
                 context.app_name = fallback_context.app_name or context.app_name
                 context.window_title = fallback_context.window_title or context.window_title
+                context.window_handle = fallback_context.window_handle
+                if shelf_source_url:
+                    # Attribute Shelf's standalone player to the configured
+                    # browser and the real YouTube page, rather than to the
+                    # Explorer-hosted popup or the extension URL.
+                    context.app_name = _default_browser_app()
+                    context.url = shelf_source_url
+                context = self._through_usage_guard(context, fallback_context)
                 context.has_recent_input = fallback_context.has_recent_input
                 context.idle_seconds = fallback_context.idle_seconds
                 context.is_afk = not context.has_recent_input
@@ -69,7 +94,9 @@ class ActivityProbe:
                     )
                 )
                 context.background_media = self._background_media(context)
+                self._remember_non_guard_context(context, fallback_context)
                 return context
+        fallback_context = self._through_usage_guard(fallback_context, fallback_context)
         fallback_context.is_video_playing = (
             not fallback_context.has_recent_input
             and (
@@ -78,7 +105,30 @@ class ActivityProbe:
             )
         )
         fallback_context.background_media = self._background_media(fallback_context)
+        self._remember_non_guard_context(fallback_context, fallback_context)
         return fallback_context
+
+    def _through_usage_guard(self, context, foreground_context):
+        """Keep Usage Guard out of attribution without changing media rules."""
+        if not (
+            _is_usage_guard_window(foreground_context)
+            and self._last_non_guard_context is not None
+        ):
+            return context
+        previous = self._last_non_guard_context
+        # Do not keep a stale video context after its own window has been
+        # minimized. In that case the normal background-media path must decide
+        # whether the playback is passive.
+        if _is_minimized_window(previous.window_handle):
+            return context
+        context.app_name = previous.app_name
+        context.window_title = previous.window_title
+        context.url = previous.url
+        return context
+
+    def _remember_non_guard_context(self, context, foreground_context):
+        if not _is_usage_guard_window(foreground_context):
+            self._last_non_guard_context = replace(context)
 
     def _background_media(self, context):
         labels = []
@@ -194,6 +244,7 @@ class WindowsActivityProbe:
             if not handle:
                 return ActiveContext(
                     window_title=title,
+                    window_handle=int(hwnd),
                     is_afk=self._is_afk(idle_seconds),
                     has_recent_input=self._has_recent_input(idle_seconds),
                     idle_seconds=idle_seconds,
@@ -207,6 +258,7 @@ class WindowsActivityProbe:
             return ActiveContext(
                 app_name=app_name,
                 window_title=title,
+                window_handle=int(hwnd),
                 is_afk=self._is_afk(idle_seconds),
                 has_recent_input=self._has_recent_input(idle_seconds),
                 idle_seconds=idle_seconds,
@@ -314,20 +366,54 @@ def _is_foreground_browser_video(context):
 
 def _is_shelf_video_window(context):
     """Identify YouTube Shelf's foreground popup, reported as explorer.exe."""
+    return bool(_shelf_source_url(context.url))
+
+
+def _is_shelf_popup_app(app_name):
+    """YouTube Shelf hosts its standalone player window in Explorer."""
+    return str(app_name or "").rsplit("\\", 1)[-1].lower() == "explorer.exe"
+
+
+def _is_usage_guard_window(context):
+    """Recognize the control window in packaged and development builds."""
+    executable = str(context.app_name or "").rsplit("\\", 1)[-1].lower()
+    title = str(context.window_title or "").strip().casefold()
+    return executable == "usage-guard.exe" or title == "usage monitor"
+
+
+def _is_minimized_window(window_handle):
+    """Check the exact native window that was previously in the foreground."""
+    if platform.system() != "Windows" or not window_handle:
+        return False
     try:
-        parsed_url = urlparse(str(context.url))
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        return bool(user32.IsIconic(int(window_handle)))
+    except Exception:
+        return False
+
+
+def _shelf_source_url(url):
+    """Return the video URL embedded in a YouTube Shelf extension URL."""
+    try:
+        parsed_url = urlparse(str(url))
         if parsed_url.scheme != "chrome-extension":
-            return False
+            return ""
         query = parse_qs(parsed_url.query)
         source_url = query.get("sourceUrl", [""])[0]
-        video_title = query.get("title", [""])[0]
     except ValueError:
-        return False
-    return bool(
-        video_title
-        and video_title.lower() in str(context.window_title).lower()
-        and _is_video_context("brave.exe", source_url)
-    )
+        return ""
+    return source_url if _is_video_context(_default_browser_app(), source_url) else ""
+
+
+def _default_browser_app():
+    browsers = [
+        str(value).lower()
+        for value in getattr(config, "BROWSER_APPS", ["brave.exe"])
+        if str(value).strip()
+    ]
+    return browsers[0] if browsers else "brave.exe"
 
 
 def _media_label(source, current_url):
