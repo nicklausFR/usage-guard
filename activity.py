@@ -2,6 +2,7 @@ import platform
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from urllib.error import URLError
@@ -359,6 +360,8 @@ class WindowsMediaProbe:
         self._last_key = None
         self._last_result = False
         self._last_sources = []
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="media-probe")
+        self._pending_query = None
 
     def is_playing_for(self, app_name, url=""):
         if not self._available or not app_name:
@@ -370,11 +373,28 @@ class WindowsMediaProbe:
     def playing_sources(self):
         if not self._available:
             return []
+
+        # The WinRT request can occasionally stall.  It must never run on the
+        # Qt GUI thread, otherwise tray clicks, menus, and Ctrl+C stop being
+        # processed while Windows is resolving media sessions.
+        if self._pending_query is not None and self._pending_query.done():
+            try:
+                self._last_sources = self._pending_query.result()
+            except Exception:
+                self._last_sources = []
+            self._pending_query = None
+
         now = time.monotonic()
         if now - self._last_check < 3:
             return list(self._last_sources)
         self._last_check = now
-        self._last_sources = []
+
+        if self._pending_query is None:
+            self._pending_query = self._executor.submit(self._query_sources)
+        return list(self._last_sources)
+
+    @staticmethod
+    def _query_sources():
         try:
             import asyncio
             from winrt.windows.media.control import (
@@ -386,15 +406,14 @@ class WindowsMediaProbe:
                 manager = await GlobalSystemMediaTransportControlsSessionManager.request_async()
                 return manager.get_sessions()
 
-            self._last_sources = [
+            return [
                 str(session.source_app_user_model_id)
                 for session in asyncio.run(get_sessions())
                 if session.get_playback_info().playback_status
                 == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
             ]
         except Exception:
-            pass
-        return list(self._last_sources)
+            return []
 
 
 def _same_application(app_name, source_app_user_model_id):

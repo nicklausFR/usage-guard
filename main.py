@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 from activitywatch_manager import ActivityWatchManager
 from browser_bridge import browser_bridge
 from control_sources import TrayControlSource
-from usage_guard import config, configure_windows_autostart
+from usage_guard import config, configure_windows_autostart, debug_log
 
 
 # Keep this handle alive for the lifetime of the process.  Windows releases
@@ -37,6 +37,7 @@ if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
 app = QApplication(sys.argv)
 app.setQuitOnLastWindowClosed(False)
 signal.signal(signal.SIGINT, lambda *_: app.quit())
+debug_log("application started")
 
 if bool(getattr(config, "ACTIVITYWATCH_ENABLED", False)):
     activitywatch = ActivityWatchManager()
@@ -48,6 +49,7 @@ app.aboutToQuit.connect(browser_bridge.stop)
 
 tray_source = TrayControlSource()
 tray_source.start()
+debug_log("tray icon creation scheduled")
 app.aboutToQuit.connect(tray_source.stop)
 
 configure_windows_autostart(bool(getattr(config, "AUTOSTART_WITH_WINDOWS", True)))

@@ -27,7 +27,9 @@ class MonitoringService(QObject):
     def start(self):
         self._last_tick = time.monotonic()
         self.timer.start()
-        self.tick()
+        # Let Qt process its first events (notably the tray-icon registration)
+        # before starting activity collection.
+        QTimer.singleShot(0, self.tick)
 
     def stop(self):
         self.timer.stop()

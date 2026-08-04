@@ -272,19 +272,31 @@ def create_tray_icon(toggle_callback, service):
     menu.addSeparator()
     menu.addAction(quit_action)
     icon.setContextMenu(menu)
-    icon.activated.connect(
-        lambda reason: toggle_callback()
-        if reason == QSystemTrayIcon.ActivationReason.Trigger
-        else None
-    )
+    def handle_activation(reason):
+        if reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        ):
+            # Queue this until the shell's tray-message handler has returned.
+            # On Windows this prevents a click from being swallowed while the
+            # notification-area menu is being dismissed.
+            QTimer.singleShot(0, toggle_callback)
+
+    icon.activated.connect(handle_activation)
     # Keep Python references alive for the lifetime of the tray icon.
     icon._menu = menu
     icon._open_action = open_action
     icon._quit_action = quit_action
+    icon._handle_activation = handle_activation
     icon.show()
-    # Explorer can ignore an icon registered before Qt's event loop has fully
-    # started. Re-show it on the first event-loop turn to register it reliably.
-    QTimer.singleShot(0, icon.show)
+
+    # At logon, Explorer (which owns the notification area) may still be
+    # starting.  A single immediate retry is often still too early.  Retry for
+    # the first minute so the icon is eventually registered without requiring
+    # the user to restart Usage Monitor.
+    retry_delays_ms = (500, 1_500, 5_000, 15_000, 45_000)
+    for delay_ms in retry_delays_ms:
+        QTimer.singleShot(delay_ms, icon.show)
     return icon
 
 
