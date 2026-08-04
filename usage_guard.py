@@ -47,16 +47,26 @@ config = Config()
 
 
 def computer_on_seconds_today():
-    """Return today's Windows uptime, independently of this app's start time."""
+    """Return today's awake time, independently of this app's start time.
+
+    ``GetTickCount64`` includes time spent sleeping, which made the value shown
+    as "Allumé" grow while the computer was in standby.  Windows' unbiased
+    interrupt time advances only while the system is awake.
+    """
     if sys.platform != "win32":
         return None
     try:
         import ctypes
 
-        uptime_seconds = ctypes.windll.kernel32.GetTickCount64() / 1000.0
+        awake_time_100ns = ctypes.c_ulonglong()
+        if not ctypes.windll.kernel32.QueryUnbiasedInterruptTime(
+            ctypes.byref(awake_time_100ns)
+        ):
+            return None
+        awake_seconds = awake_time_100ns.value / 10_000_000.0
         now = datetime.now()
         start_of_day = datetime.combine(now.date(), datetime.min.time())
-        return min(uptime_seconds, (now - start_of_day).total_seconds())
+        return min(awake_seconds, (now - start_of_day).total_seconds())
     except (AttributeError, OSError):
         return None
 
@@ -154,6 +164,7 @@ class AppUsageStore:
             data.setdefault("browser_categories", {})
             data.setdefault("browser_labels", {})
             data.setdefault("browser_specific_sites", {})
+            data.setdefault("site_categories", [])
             data.setdefault("other_site_days", {})
             data.setdefault("passive_days", {})
             data.setdefault("passive_excluded", [])
@@ -179,6 +190,7 @@ class AppUsageStore:
             "browser_categories": {},
             "browser_labels": {},
             "browser_specific_sites": {},
+            "site_categories": [],
             "other_site_days": {},
             "passive_days": {},
             "passive_excluded": [],
@@ -270,6 +282,12 @@ class AppUsageStore:
             if category and metadata.get("category") != category:
                 metadata["category"] = category
                 changed = True
+        saved_site_categories = self.data.setdefault("site_categories", [])
+        for metadata in self.data["targets"].values():
+            category = str(metadata.get("site_category", "")).strip()
+            if category and category not in saved_site_categories:
+                saved_site_categories.append(category)
+                changed = True
         for media in self.data.get("passive_days", {}).values():
             # Old builds could only identify Brave's media session. The
             # browser extension now resolves this case as YouTube instead.
@@ -348,9 +366,13 @@ class AppUsageStore:
             self._dirty = True
             self.save(force=True)
 
-    def other_sites(self, browser):
+    def other_sites(self, browser, when=None):
+        """Return unclassified browser-site totals for one day or all time."""
         totals = {}
-        for hosts in self.data.get("other_site_days", {}).get(str(browser).lower(), {}).values():
+        days = self.data.get("other_site_days", {}).get(str(browser).lower(), {})
+        if when is not None:
+            days = {when.isoformat(): days.get(when.isoformat(), {})}
+        for hosts in days.values():
             for host, seconds in hosts.items():
                 totals[host] = totals.get(host, 0.0) + float(seconds)
         return totals
@@ -499,6 +521,9 @@ class AppUsageStore:
         if browser:
             if category:
                 metadata["site_category"] = category
+                saved_categories = self.data.setdefault("site_categories", [])
+                if category not in saved_categories:
+                    saved_categories.append(category)
                 metadata.setdefault(
                     "category", self.data.get("browser_categories", {}).get(browser, _browser_label(browser))
                 )
@@ -597,6 +622,13 @@ class AppUsageStore:
         category = str(category).strip()
         if not category:
             return
+        saved_categories = self.data.setdefault("site_categories", [])
+        for key in keys:
+            previous = self.data["targets"].setdefault(key, {}).get("site_category")
+            if previous in saved_categories:
+                saved_categories.remove(previous)
+        if category not in saved_categories:
+            saved_categories.append(category)
         for key in keys:
             self.data["targets"].setdefault(key, {})["site_category"] = category
         self._dirty = True
@@ -604,6 +636,7 @@ class AppUsageStore:
 
     def categories(self):
         categories = set(self.data.get("browser_categories", {}).values())
+        categories.update(self.data.get("site_categories", []))
         categories.update(
             metadata.get("category", "")
             for metadata in self.data["targets"].values()
@@ -616,6 +649,9 @@ class AppUsageStore:
             category for category in categories
             if category and category != "Applications non classées"
         )
+
+    def site_categories(self):
+        return sorted(category for category in self.data.get("site_categories", []) if category)
 
     def presentation(self, usage):
         entries = []

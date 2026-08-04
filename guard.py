@@ -56,6 +56,7 @@ class MonitoringService(QObject):
         )
         passive = bool(background_media)
         debug_snapshot = (
+            str(self.current_context.source),
             str(self.current_context.app_name),
             str(self.current_context.window_title),
             str(self.current_context.url),
@@ -68,9 +69,10 @@ class MonitoringService(QObject):
         )
         if debug_snapshot != self._last_debug_snapshot:
             debug_log(
-                "app={!r}; title={!r}; url={!r}; recent_input={}; audible={}; "
+                "source={!r}; app={!r}; title={!r}; url={!r}; recent_input={}; audible={}; "
                 "video_playing={}; foreground_counted={}; "
                 "background_media={!r}; windows_media_sources={!r}; passive={}".format(
+                    self.current_context.source,
                     self.current_context.app_name,
                     self.current_context.window_title,
                     self.current_context.url,

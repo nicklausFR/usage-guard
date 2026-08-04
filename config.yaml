@@ -12,7 +12,11 @@ VIDEO_URL_PATTERNS: [youtube.com, netflix.com, primevideo.com, twitch.tv, vimeo.
 BROWSER_APPS: [brave.exe]
 AFK_AFTER_SECONDS: 120
 AUTOSTART_WITH_WINDOWS: true
-ACTIVITYWATCH_ENABLED: true
+ACTIVITYWATCH_ENABLED: false
+# The bundled Brave companion extension is the preferred source for the
+# active tab URL. ActivityWatch remains a fallback until it is installed.
+BROWSER_BRIDGE_ENABLED: true
+BROWSER_BRIDGE_STALE_SECONDS: 90
 ACTIVITYWATCH_BASE_URL: http://localhost:5600
 ACTIVITYWATCH_TIMEOUT_SECONDS: 0.1
 ACTIVITYWATCH_AUTOSTART_HEADLESS: true

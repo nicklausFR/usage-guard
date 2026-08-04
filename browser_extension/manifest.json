@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "Usage Guard Browser Bridge",
+  "version": "1.0.0",
+  "description": "Sends the active Brave tab to local Usage Guard.",
+  "permissions": ["tabs", "alarms"],
+  "host_permissions": ["http://127.0.0.1:8765/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{
+    "matches": ["http://*/*", "https://*/*"],
+    "js": ["content.js"],
+    "run_at": "document_start"
+  }]
+}

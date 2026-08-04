@@ -1,5 +1,6 @@
 import platform
 import json
+import re
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from urllib.parse import urlencode
 from urllib.parse import parse_qs, urlparse
 from urllib.request import urlopen
 
+from browser_bridge import browser_bridge
 from usage_guard import config
 
 
@@ -39,6 +41,12 @@ class ActivityProbe:
         # activity. ActivityWatch's AFK threshold is independent and can leave
         # a long tail after the user stops interacting.
         fallback_context = self._fallback.current()
+        bridge_tab = self._current_bridge_tab()
+        if bridge_tab is not None:
+            self._last_browser_url = bridge_tab.url
+        bridge_context = self._browser_bridge_context(fallback_context)
+        if bridge_context is not None:
+            return self._finish_context(bridge_context, fallback_context)
         if getattr(config, "ACTIVITYWATCH_ENABLED", True):
             context = self.aw.current()
             if context is not None:
@@ -78,35 +86,89 @@ class ActivityProbe:
                     # Explorer-hosted popup or the extension URL.
                     context.app_name = _default_browser_app()
                     context.url = shelf_source_url
-                context = self._through_usage_guard(context, fallback_context)
-                context.has_recent_input = fallback_context.has_recent_input
-                context.idle_seconds = fallback_context.idle_seconds
-                context.is_afk = not context.has_recent_input
-                context.is_video_playing = (
-                    not context.has_recent_input
-                    and (
-                        _is_foreground_browser_video(context)
-                        or (
-                            _is_configured_browser(context.app_name)
-                            and context.browser_media_playing
-                        )
-                        or self._media.is_playing_for(context.app_name, context.url)
-                    )
-                )
-                context.background_media = self._background_media(context)
-                self._remember_non_guard_context(context, fallback_context)
-                return context
-        fallback_context = self._through_usage_guard(fallback_context, fallback_context)
-        fallback_context.is_video_playing = (
-            not fallback_context.has_recent_input
+                elif (
+                    _is_configured_browser(context.app_name)
+                    and _is_youtube_title(context.window_title)
+                    and not _is_youtube_url(context.url)
+                ):
+                    # ActivityWatch can retain the URL of the tab that opened
+                    # Shelf while the native window already has the video's
+                    # YouTube title. Never charge that stale URL to its old
+                    # website: the player belongs to YouTube.
+                    context.url = "https://www.youtube.com/"
+                elif (
+                    _is_configured_browser(context.app_name)
+                    and _is_youtube_url(context.url)
+                    and _is_regular_browser_tab(context.window_title)
+                    and not _is_youtube_title(context.window_title)
+                ):
+                    # Conversely, a regular Brave tab with a non-YouTube
+                    # native title must not inherit the Shelf video's stale
+                    # URL. Recover the visible host when its title exposes
+                    # one; otherwise leave the browser unattributed rather
+                    # than charging the time to YouTube.
+                    context.url = _host_url_from_title(context.window_title)
+                elif _is_configured_browser(context.app_name) and not context.url:
+                    # ActivityWatch can briefly omit a page URL after a
+                    # navigation. Use an unambiguous host exposed by the
+                    # native tab title so that a known site is not lost.
+                    context.url = _host_url_from_title(context.window_title)
+                return self._finish_context(context, fallback_context)
+        return self._finish_context(fallback_context, fallback_context)
+
+    def _browser_bridge_context(self, fallback_context):
+        tab = self._current_bridge_tab()
+        if tab is None:
+            return None
+        if _is_configured_browser(fallback_context.app_name):
+            app_name = fallback_context.app_name
+        elif _is_shelf_popup_app(fallback_context.app_name) and _is_video_context(
+            _default_browser_app(), tab.url
+        ):
+            app_name = _default_browser_app()
+        else:
+            return None
+        return ActiveContext(
+            app_name=app_name,
+            window_title=fallback_context.window_title or tab.title,
+            window_handle=fallback_context.window_handle,
+            url=tab.url,
+            browser_media_playing=tab.audible,
+            source="browser-extension",
+        )
+
+    @staticmethod
+    def _current_bridge_tab():
+        if not bool(getattr(config, "BROWSER_BRIDGE_ENABLED", True)):
+            return None
+        return browser_bridge.current(
+            float(getattr(config, "BROWSER_BRIDGE_STALE_SECONDS", 90))
+        )
+
+    def _finish_context(self, context, fallback_context):
+        context = self._through_usage_guard(context, fallback_context)
+        if _is_system_popup_title(context.window_title):
+            # Windows can briefly report the system-tray overflow popup as a
+            # Brave window after minimizing Shelf. It is not the player, so
+            # let Brave's media session be accounted as background playback.
+            context.app_name = "explorer.exe"
+        context.has_recent_input = fallback_context.has_recent_input
+        context.idle_seconds = fallback_context.idle_seconds
+        context.is_afk = not context.has_recent_input
+        context.is_video_playing = (
+            not context.has_recent_input
             and (
-                _is_foreground_browser_video(fallback_context)
-                or self._media.is_playing_for(fallback_context.app_name, fallback_context.url)
+                _is_foreground_browser_video(context)
+                or (
+                    _is_configured_browser(context.app_name)
+                    and context.browser_media_playing
+                )
+                or self._media.is_playing_for(context.app_name, context.url)
             )
         )
-        fallback_context.background_media = self._background_media(fallback_context)
-        self._remember_non_guard_context(fallback_context, fallback_context)
-        return fallback_context
+        context.background_media = self._background_media(context)
+        self._remember_non_guard_context(context, fallback_context)
+        return context
 
     def _through_usage_guard(self, context, foreground_context):
         """Keep Usage Guard out of attribution without changing media rules."""
@@ -135,7 +197,7 @@ class ActivityProbe:
         for source in self._media.playing_sources():
             if _same_application(context.app_name, source):
                 continue
-            label = _media_label(source, context.url)
+            label = _media_label(source, context.url or self._last_browser_url)
             if label != "Brave":
                 labels.append(label)
         if context.browser_media_playing and not _is_configured_browser(context.app_name):
@@ -476,6 +538,40 @@ def _is_video_title(title):
         if service and service in title_lower:
             return True
     return False
+
+
+def _is_youtube_title(title):
+    return "youtube" in str(title or "").casefold()
+
+
+def _is_youtube_url(url):
+    try:
+        host = (urlparse(str(url)).hostname or "").casefold().removeprefix("www.")
+    except ValueError:
+        return False
+    return host == "youtube.com" or host.endswith(".youtube.com") or host == "youtu.be"
+
+
+def _is_system_popup_title(title):
+    value = str(title or "").casefold()
+    return (
+        "barre d’état système" in value
+        or "system tray" in value
+        or "notification overflow" in value
+    )
+
+
+def _is_regular_browser_tab(title):
+    title_lower = str(title or "").casefold().strip()
+    return title_lower.endswith((" - brave", " â€“ brave", " – brave"))
+
+
+def _host_url_from_title(title):
+    title_text = str(title or "")
+    match = re.search(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", title_text, re.I)
+    if not match and re.search(r"\bbbc\b", title_text, re.I):
+        return "https://www.bbc.com/"
+    return f"https://{match.group(0)}" if match else ""
 
 
 def _event_timestamp(event):

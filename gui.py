@@ -23,6 +23,9 @@ from PySide6.QtWidgets import (
 from usage_guard import computer_on_seconds_today, config
 
 
+_DURATION_SECONDS_ROLE = Qt.UserRole + 3
+
+
 class CategoryHeader(QLabel):
     target_dropped = Signal(str)
     drag_started = Signal()
@@ -168,6 +171,12 @@ class UsageRow(QWidget):
 
 class UsageTree(QTreeWidget):
     moved_to_root = Signal(str)
+    moved_to_category = Signal(str, str)
+    moved_to_browser = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._dragged_target_key = None
 
     def dragEnterEvent(self, event):
         event.acceptProposedAction()
@@ -175,14 +184,55 @@ class UsageTree(QTreeWidget):
     def dragMoveEvent(self, event):
         event.acceptProposedAction()
 
+    def startDrag(self, supported_actions):
+        item = self.currentItem()
+        self._dragged_target_key = (
+            item.data(0, Qt.UserRole + 1)
+            if item is not None and item.data(0, Qt.UserRole) == "target"
+            else None
+        )
+        super().startDrag(supported_actions)
+        self._dragged_target_key = None
+
+    @staticmethod
+    def _parent_category(item):
+        while item is not None:
+            if item.data(0, Qt.UserRole) in {"category", "site-category"}:
+                return item.text(0)
+            item = item.parent()
+        return None
+
+    @staticmethod
+    def _parent_browser(item):
+        while item is not None:
+            if item.data(0, Qt.UserRole) == "browser":
+                return item
+            item = item.parent()
+        return None
+
     def dropEvent(self, event):
         source_view = event.source()
         source = source_view.currentItem() if isinstance(source_view, QTreeWidget) else self.currentItem()
-        if source is not None and source.data(0, Qt.UserRole) == "target":
+        source_key = self._dragged_target_key
+        if source_key is None and source is not None and source.data(0, Qt.UserRole) == "target":
+            source_key = source.data(0, Qt.UserRole + 1)
+        if source_key is not None:
             destination = self.itemAt(event.position().toPoint())
+            category = self._parent_category(destination)
+            if category is not None:
+                self.moved_to_category.emit(source_key, category)
+                event.setDropAction(Qt.MoveAction)
+                event.accept()
+                return
+            if self._parent_browser(destination) is not None:
+                self.moved_to_browser.emit(source_key)
+                event.setDropAction(Qt.MoveAction)
+                event.accept()
+                return
             if destination is None or destination.parent() is None:
-                self.moved_to_root.emit(source.data(0, Qt.UserRole + 1))
-                event.acceptProposedAction()
+                self.moved_to_root.emit(source_key)
+                event.setDropAction(Qt.MoveAction)
+                event.accept()
                 return
         super().dropEvent(event)
 
@@ -232,6 +282,9 @@ def create_tray_icon(toggle_callback, service):
     icon._open_action = open_action
     icon._quit_action = quit_action
     icon.show()
+    # Explorer can ignore an icon registered before Qt's event loop has fully
+    # started. Re-show it on the first event-loop turn to register it reliably.
+    QTimer.singleShot(0, icon.show)
     return icon
 
 
@@ -287,12 +340,12 @@ class PopupPanel(QWidget):
         system_header = QLabel("Ordinateur")
         system_header.setStyleSheet("color: #8fcaff; font-size: 12px; font-weight: bold;")
         system_layout.addWidget(system_header)
-        self.system_on_label = self._system_duration_row(system_layout, "Allumé")
+        self.system_on_label = self._system_duration_row(system_layout, "Session Windows")
         self.system_foreground_label = self._system_duration_row(
             system_layout, "Utilisation active"
         )
         self.system_with_passive_label = self._system_duration_row(
-            system_layout, "Utilisation passive"
+            system_layout, "Usage passif"
         )
         layout.addWidget(self.system_widget)
 
@@ -321,6 +374,8 @@ class PopupPanel(QWidget):
         self.tree.itemExpanded.connect(lambda item: self._remember_tree_state(item, True))
         self.tree.itemCollapsed.connect(lambda item: self._remember_tree_state(item, False))
         self.tree.moved_to_root.connect(self._move_target_to_root)
+        self.tree.moved_to_category.connect(self._move_target_to_category)
+        self.tree.moved_to_browser.connect(self._move_target_to_browser)
         layout.addWidget(self.tree, 1)
 
         self.excluded_apps_button = QPushButton("Applications exclues…")
@@ -393,6 +448,7 @@ class PopupPanel(QWidget):
         grouped = {}
         for entry in entries:
             grouped.setdefault(entry.category, []).append(entry)
+        brave_displayed = False
         for category, category_entries in sorted(grouped.items(), key=lambda item: sum(x.seconds for x in item[1]), reverse=True):
             if category == "__root__":
                 brave_entries = [entry for entry in category_entries if _is_brave_entry(entry)]
@@ -402,6 +458,7 @@ class PopupPanel(QWidget):
                 ):
                     self._tree_item(None, entry.label, entry.seconds, "target", entry.key)
                 if brave_entries:
+                    brave_displayed = True
                     browser = self._tree_item(
                         None, self.service.usage.browser_label("brave.exe"), sum(entry.seconds for entry in brave_entries),
                         "browser", "brave.exe"
@@ -418,13 +475,14 @@ class PopupPanel(QWidget):
                             direct.append(entry)
                     for entry in sorted(direct, key=lambda x: x.seconds, reverse=True):
                         self._tree_item(browser, entry.label, entry.seconds, "target", entry.key)
-                    for name, site_entries in sorted(grouped_sites.items()):
+                    for name in sorted(set(grouped_sites) | set(self.service.usage.site_categories())):
+                        site_entries = grouped_sites.get(name, [])
                         node = self._tree_item(browser, name, sum(x.seconds for x in site_entries), "site-category", (name, [x.key for x in site_entries]))
                         for entry in sorted(site_entries, key=lambda x: x.seconds, reverse=True):
                             self._tree_item(node, entry.label, entry.seconds, "target", entry.key)
                     for entry in other_sites:
                         node = self._tree_item(browser, "Autres sites", entry.seconds, "other-sites", entry.key)
-                        for host, seconds in sorted(self.service.usage.other_sites("brave.exe").items(), key=lambda x: x[1], reverse=True):
+                        for host, seconds in sorted(self._other_sites_for_display("brave.exe").items(), key=lambda x: x[1], reverse=True):
                             self._tree_item(node, host, seconds, "other-site", ("brave.exe", host))
                 continue
             root = self._tree_item(None, category, sum(x.seconds for x in category_entries), "category", [x.key for x in category_entries])
@@ -432,6 +490,7 @@ class PopupPanel(QWidget):
             for entry in sorted((x for x in category_entries if x not in brave), key=lambda x: x.seconds, reverse=True):
                 self._tree_item(root, entry.label, entry.seconds, "target", entry.key)
             if brave:
+                brave_displayed = True
                 browser = self._tree_item(root, self.service.usage.browser_label("brave.exe"), sum(x.seconds for x in brave), "browser", "brave.exe")
                 site_groups = {}
                 direct_sites = []
@@ -456,9 +515,10 @@ class PopupPanel(QWidget):
                             direct_sites.append(entry)
                 for entry in sorted(direct_sites, key=lambda x: x.seconds, reverse=True):
                     self._tree_item(browser, entry.label, entry.seconds, "target", entry.key)
-                for site_category, site_entries in sorted(
-                    site_groups.items(), key=lambda item: sum(x.seconds for x in item[1]), reverse=True
+                for site_category in sorted(
+                    set(site_groups) | set(self.service.usage.site_categories())
                 ):
+                    site_entries = site_groups.get(site_category, [])
                     parent = self._tree_item(
                         browser, site_category, sum(x.seconds for x in site_entries),
                         "site-category", (site_category, [x.key for x in site_entries])
@@ -467,8 +527,14 @@ class PopupPanel(QWidget):
                         self._tree_item(parent, entry.label, entry.seconds, "target", entry.key)
                 for entry in sorted(other_sites, key=lambda x: x.seconds, reverse=True):
                     node = self._tree_item(browser, "Autres sites", entry.seconds, "other-sites", entry.key)
-                    for host, seconds in sorted(self.service.usage.other_sites("brave.exe").items(), key=lambda x: x[1], reverse=True):
+                    for host, seconds in sorted(self._other_sites_for_display("brave.exe").items(), key=lambda x: x[1], reverse=True):
                         self._tree_item(node, host, seconds, "other-site", ("brave.exe", host))
+        if self.service.usage.site_categories() and not brave_displayed:
+            browser = self._tree_item(
+                None, self.service.usage.browser_label("brave.exe"), 0, "browser", "brave.exe"
+            )
+            for site_category in self.service.usage.site_categories():
+                self._tree_item(browser, site_category, 0, "site-category", (site_category, []))
         excluded_targets = self.service.usage.excluded_targets()
         if excluded_targets:
             excluded = self._tree_item(None, "Applications exclues", None, "excluded", None)
@@ -479,8 +545,14 @@ class PopupPanel(QWidget):
             for name, seconds in passive_usage.items():
                 self._tree_item(passive, name, seconds, "passive-item", name)
         for root_index in range(self.tree.topLevelItemCount()):
-            self._restore_tree_state(self.tree.topLevelItem(root_index))
+            root = self.tree.topLevelItem(root_index)
+            self._reconcile_duration_totals(root)
+            self._restore_tree_state(root)
         self.tree.blockSignals(False)
+
+    def _other_sites_for_display(self, browser):
+        when = date.today() if self.period.currentData() == "today" else None
+        return self.service.usage.other_sites(browser, when)
 
     def _tree_item(self, parent, label, seconds, kind, payload):
         duration = "" if seconds is None else _format_seconds(seconds)
@@ -489,12 +561,48 @@ class PopupPanel(QWidget):
         item.setData(0, Qt.UserRole + 1, payload)
         state_key = f"{kind}:{payload}"
         item.setData(0, Qt.UserRole + 2, state_key)
+        item.setData(0, _DURATION_SECONDS_ROLE, None if seconds is None else float(seconds))
         if kind == "target":
             item.setFlags(item.flags() | Qt.ItemIsDragEnabled)
         item.setForeground(1, QColor("#27d17f"))
         if kind in {"category", "browser", "site-category", "other-sites", "passive", "excluded"}:
             item.setForeground(0, QColor("#8fcaff"))
         return item
+
+    def _reconcile_duration_totals(self, item, displayed_seconds=None):
+        """Make the displayed duration of every parent equal its children.
+
+        Usage is stored with sub-second precision. Truncating each row separately
+        can otherwise make a category differ by a second or two from the sum of
+        the rows visibly below it. The rounding remainder is assigned to the
+        children with the largest fractional parts.
+        """
+        raw_seconds = item.data(0, _DURATION_SECONDS_ROLE)
+        if raw_seconds is None:
+            return
+
+        children = [
+            item.child(index)
+            for index in range(item.childCount())
+            if item.child(index).data(0, _DURATION_SECONDS_ROLE) is not None
+        ]
+        if displayed_seconds is None:
+            displayed_seconds = int(float(raw_seconds) + 0.5)
+
+        if children:
+            child_values = [float(child.data(0, _DURATION_SECONDS_ROLE)) for child in children]
+            child_seconds = [int(value) for value in child_values]
+            remainder = displayed_seconds - sum(child_seconds)
+            for index in sorted(
+                range(len(children)),
+                key=lambda index: child_values[index] - child_seconds[index],
+                reverse=True,
+            )[:max(0, remainder)]:
+                child_seconds[index] += 1
+            for child, seconds in zip(children, child_seconds):
+                self._reconcile_duration_totals(child, seconds)
+
+        item.setText(1, _format_seconds(displayed_seconds))
 
     def _restore_tree_state(self, item):
         if item.childCount():
@@ -511,6 +619,19 @@ class PopupPanel(QWidget):
 
     def _move_target_to_root(self, target_key):
         self.service.usage.make_root(target_key)
+        self.refresh()
+
+    def _move_target_to_category(self, target_key, category):
+        self.service.usage.set_category(target_key, category)
+        self.refresh()
+
+    def _move_target_to_browser(self, target_key):
+        # A specific site dropped directly on its browser remains a browser
+        # site; only its optional site sub-category must be removed.
+        if str(target_key).startswith("site:"):
+            self.service.usage.set_category(target_key, "")
+        else:
+            self.service.usage.make_root(target_key)
         self.refresh()
 
     def _show_tree_menu(self, position):
