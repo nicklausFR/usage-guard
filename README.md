@@ -10,8 +10,8 @@ time. Time limits and rules will be implemented in a later phase.
   made specific, placed in sub-categories, renamed, merged, or excluded.
 - Tracks background media separately as **Passive playback** when a real media
   session continues while another application is in use.
-- Shows today's totals or all-time totals, including computer on time, active
-  use, and passive media use.
+- Shows totals for today, any selected day, or all time, including computer on
+  time, active use, and passive media use.
 - Keeps activity data locally.
 
 ## Requirements

@@ -1,11 +1,12 @@
 from datetime import date
 
-from PySide6.QtCore import QMimeData, QPoint, QTimer, Qt, QSize, Signal
+from PySide6.QtCore import QDate, QMimeData, QPoint, QTimer, Qt, QSize, Signal
 from PySide6.QtGui import QAction, QColor, QDrag, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QComboBox,
+    QDateEdit,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -335,11 +336,21 @@ class PopupPanel(QWidget):
         self.status_label.setStyleSheet("color: #b8b8bd;")
         self.period = QComboBox()
         self.period.addItem("Aujourd’hui", "today")
+        self.period.addItem("Choisir un jour…", "date")
         self.period.addItem("Depuis le début", "all")
         self.period.setStyleSheet(_combo_style())
-        self.period.currentIndexChanged.connect(self.refresh)
+        self.period.currentIndexChanged.connect(self._period_changed)
+        self.day_picker = QDateEdit(QDate.currentDate().addDays(-1))
+        self.day_picker.setCalendarPopup(True)
+        self.day_picker.setDisplayFormat("dd/MM/yyyy")
+        self.day_picker.setMaximumDate(QDate.currentDate())
+        self.day_picker.setToolTip("Choisir le jour à afficher")
+        self.day_picker.setStyleSheet(_combo_style())
+        self.day_picker.dateChanged.connect(self.refresh)
+        self.day_picker.hide()
         status_row.addWidget(self.status_label, 1)
         status_row.addWidget(self.period)
+        status_row.addWidget(self.day_picker)
         layout.addLayout(status_row)
 
         self.system_widget = QWidget()
@@ -420,24 +431,25 @@ class PopupPanel(QWidget):
             status = "En attente d’une application active"
         self.status_label.setText(status)
 
+        selected_day = self._selected_day()
         usage = (
-            self.service.usage.usage_for_day(date.today())
-            if self.period.currentData() == "today"
+            self.service.usage.usage_for_day(selected_day)
+            if selected_day is not None
             else self.service.usage.total_usage()
         )
         entries = self.service.usage.presentation(usage)
         passive_usage = (
-            self.service.usage.passive_usage_for_day(date.today())
-            if self.period.currentData() == "today"
+            self.service.usage.passive_usage_for_day(selected_day)
+            if selected_day is not None
             else self.service.usage.total_passive_usage()
         )
         system_usage = (
-            self.service.usage.system_usage_for_day(date.today())
-            if self.period.currentData() == "today"
+            self.service.usage.system_usage_for_day(selected_day)
+            if selected_day is not None
             else self.service.usage.total_system_usage()
         )
         system_on_seconds = system_usage["on"]
-        if self.period.currentData() == "today":
+        if selected_day == date.today():
             system_on_seconds = computer_on_seconds_today() or system_on_seconds
         self.system_on_label.setText(_format_seconds(system_on_seconds))
         # The active total must match the activities shown below exactly.
@@ -449,6 +461,20 @@ class PopupPanel(QWidget):
         )
         self._replace_rows(entries, passive_usage)
         self._has_rendered = True
+
+    def _period_changed(self):
+        self.day_picker.setVisible(self.period.currentData() == "date")
+        self.refresh()
+
+    def _selected_day(self):
+        """Return the displayed day, or None for the all-time view."""
+        period = self.period.currentData()
+        if period == "all":
+            return None
+        if period == "today":
+            return date.today()
+        selected = self.day_picker.date()
+        return date(selected.year(), selected.month(), selected.day())
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -563,8 +589,7 @@ class PopupPanel(QWidget):
         self.tree.blockSignals(False)
 
     def _other_sites_for_display(self, browser):
-        when = date.today() if self.period.currentData() == "today" else None
-        return self.service.usage.other_sites(browser, when)
+        return self.service.usage.other_sites(browser, self._selected_day())
 
     def _tree_item(self, parent, label, seconds, kind, payload):
         duration = "" if seconds is None else _format_seconds(seconds)
