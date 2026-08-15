@@ -93,15 +93,15 @@ function ensureLimitUi() {
   banner.style.cssText = [
     "display:none", "position:fixed", "z-index:2147483647", "top:0", "left:0", "right:0",
     "box-sizing:border-box", "min-height:48px", "padding:11px 14px 9px",
-    "background:#9b2229", "color:white", "font:600 14px system-ui,sans-serif",
-    "box-shadow:0 3px 12px #0008"
+    "background:rgba(100,18,24,.62)", "color:white", "font:600 14px system-ui,sans-serif",
+    "box-shadow:0 2px 8px #0005", "pointer-events:none", "user-select:none"
   ].join(";");
   label.style.cssText = "vertical-align:middle";
   countdown.style.cssText = "float:right;margin-left:14px;font-variant-numeric:tabular-nums";
   bonus.style.cssText = [
     "display:none", "float:right", "margin:-4px 0 0 14px", "padding:5px 10px",
     "border:1px solid #ffb3b3", "border-radius:5px", "background:#68181e",
-    "color:white", "font:600 12px system-ui,sans-serif", "cursor:pointer"
+    "color:white", "font:600 12px system-ui,sans-serif", "cursor:pointer", "pointer-events:auto"
   ].join(";");
   progress.style.cssText = "clear:both;height:5px;margin-top:9px;overflow:hidden;border-radius:99px;background:#65191e";
   fill.style.cssText = "height:100%;width:0;background:#ff6b6b;transition:width .35s linear";

@@ -2,6 +2,7 @@
 
 ## Développement local
 
+15/08/2026 14:40 — développement local — Le bandeau de limite de l’extension navigateur devient translucide et laisse passer les clics vers la page, tout en conservant le bouton de rallonge et l’overlay de blocage final.
 15/08/2026 14:35 — développement local — Dans la PWA distante, l’onglet Paramètres reste visible mais ne montre aucun contenu aux comptes non administrateurs ; les administrateurs n’y voient que la gestion des utilisateurs.
 15/08/2026 14:30 — documentation — The target architecture reference is now fully written in English and has been checked for sensitive information.
 15/08/2026 14:25 — build local — Le contrôle de relance identifie désormais directement le chemin de l’exécutable lancé, sans faux échec « chemin inconnu ».
@@ -109,3 +110,4 @@
 15/08/2026 11:47 — v1.042 — Durées en minutes ou heures, réorganisation des catégories, infobulle du systray centrée sur les limites et boutons compacts d’activation.
 15/08/2026 12:01 — v1.043 — Préavis multiples et globaux corrigés, unités de durée, catégories réorganisables, systray simplifié, boutons ON/OFF pour toutes les limites et déploiement fiabilisé.
 15/08/2026 12:46 — v1.044 — Seuils par durée ou horaire, cibles hiérarchiques, validité datée, échéances expirées supprimées et préavis multiples regroupés.
+15/08/2026 14:36 — v1.045 — Tri décroissant des activités et paramètres distants réservés aux administrateurs.
