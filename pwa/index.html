@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f3f5f4">
+  <script>try{const choice=localStorage.getItem("usage-guard-theme")||"auto",dark=choice==="dark"||(choice==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light"}catch{}</script>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" type="image/png" sizes="192x192" href="usage-guard-192.png">
+  <link rel="apple-touch-icon" href="usage-guard-192.png">
+  <link rel="stylesheet" href="style.css?v=1.044">
+  <title>Usage Guard</title>
+</head>
+<body>
+  <section id="auth-screen" class="auth-screen" hidden>
+    <div class="auth-card">
+      <div class="brand auth-brand"><span class="brand-mark">UG</span><div><strong>Usage Guard</strong><small>Accès distant sécurisé</small></div></div>
+      <form id="login-form">
+        <h1>Connexion</h1>
+        <label>Identifiant<input name="username" autocomplete="username" maxlength="32" required autofocus></label>
+        <label>Mot de passe<input name="password" type="password" autocomplete="current-password" required></label>
+        <p class="form-error" id="login-error" role="alert"></p>
+        <button type="submit" class="primary">Se connecter</button>
+      </form>
+      <form id="first-password-form" hidden>
+        <h1>Choisir votre mot de passe</h1>
+        <p>Le mot de passe temporaire doit être remplacé avant de continuer.</p>
+        <label>Mot de passe temporaire<input name="current_password" type="password" autocomplete="current-password" required></label>
+        <label>Nouveau mot de passe<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label>
+        <label>Confirmer<input name="confirmation" type="password" autocomplete="new-password" minlength="10" required></label>
+        <p class="form-error" id="first-password-error" role="alert"></p>
+        <button type="submit" class="primary">Enregistrer</button>
+      </form>
+    </div>
+  </section>
+
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">UG</span><strong>Usage Guard</strong></div>
+    <div id="header-account" class="header-account" hidden><strong id="header-username"></strong><button id="header-logout">Se déconnecter</button></div>
+  </header>
+
+  <main>
+    <nav class="tabs" aria-label="Sections">
+      <button class="active" data-tab="today">Dernière session Windows</button>
+      <button data-tab="analysis">Analyse</button>
+      <button data-tab="limits">Limites</button>
+      <button data-tab="notifications">Notifications</button>
+      <button data-tab="settings">Paramètres</button>
+    </nav>
+
+    <section id="today" class="panel active">
+      <div class="session-summary">
+        <div class="session-summary-head"><strong>Session en cours</strong><span id="on-time">—</span></div>
+        <div class="session-total-track" aria-label="Répartition de la session Windows"><i id="active-share"><span>Actif <b id="active-time">—</b></span></i><i id="passive-share"><span>Passif <b id="passive-time">—</b></span></i></div>
+        <div class="session-summary-foot"><time id="session-start">—</time><time id="session-end">—</time></div><span id="today-date" hidden></span>
+      </div>
+      <div id="today-usage" class="usage-tree"></div>
+      <div class="section-head session-head"><div><p class="eyebrow">Chronologie relative</p><h2 id="run-timeline-title">Dernière session Windows</h2></div></div>
+      <div id="session-recording" class="recording-status" role="status"><span class="pulse"></span><div><strong>Initialisation du journal horaire…</strong><small>Détection des applications visibles et des sessions multimédias</small></div></div>
+      <div id="today-sessions" class="activity-list"></div>
+    </section>
+
+    <section id="analysis" class="panel">
+      <div class="progressive-action panel-action-menu">
+        <button id="new-analysis" class="primary" aria-expanded="false" aria-controls="analysis-type-menu">Faire une analyse</button>
+        <div id="analysis-type-menu" class="choice-list" hidden>
+          <button data-analysis-type="stats"><strong>Application ou catégorie</strong><small>Total, moyenne et détail par jour</small></button>
+          <button data-analysis-type="timeline"><strong>Session Windows</strong><small>Frise chronologique détaillée</small></button>
+          <button data-workflow-cancel="analysis"><strong>← Retour</strong></button>
+        </div>
+      </div>
+      <section id="analysis-stats-panel" class="analysis-section stats-section progressive-panel" hidden>
+        <div id="analysis-stats-kind-menu" class="choice-list analysis-choice-list">
+          <button data-stats-kind="category"><strong>Catégories</strong></button>
+          <button data-stats-kind="application"><strong>Applications et sites</strong></button>
+          <button data-analysis-back="types"><strong>← Retour</strong></button>
+        </div>
+        <div id="analysis-stats-target-menu" class="choice-list analysis-choice-list" hidden></div>
+        <div id="analysis-stats-period-menu" class="choice-list analysis-choice-list" hidden>
+          <button data-stats-period="today"><strong>Aujourd’hui</strong></button>
+          <button data-stats-period="7"><strong>7 derniers jours</strong></button>
+          <button data-stats-period="30"><strong>30 derniers jours</strong></button>
+          <button data-stats-period="all"><strong>Toute la période</strong></button>
+          <button data-stats-period="custom"><strong>Choisir les dates</strong></button>
+          <button data-analysis-back="stats-target"><strong>← Retour</strong></button>
+        </div>
+        <form id="analysis-stats-custom-period" class="compact-period" hidden>
+          <input id="analysis-stats-start" type="date" aria-label="Date de début" required>
+          <input id="analysis-stats-end" type="date" aria-label="Date de fin" required>
+          <button type="submit" class="primary">Analyser</button>
+          <button type="button" data-analysis-back="stats-period">← Retour</button>
+        </form>
+        <div id="analysis-stats-results" hidden>
+          <div id="analysis-stats-summary" class="stats-summary"></div>
+          <div id="analysis-stats-chart" class="history-chart stats-chart"></div>
+        </div>
+      </section>
+      <section id="analysis-timeline-panel" class="analysis-section progressive-panel" hidden>
+        <div id="analysis-session-menu" class="choice-list analysis-choice-list"></div>
+        <div id="analysis-classification-menu" class="choice-list analysis-choice-list" hidden></div>
+        <div id="analysis-sessions" class="activity-list" hidden></div>
+      </section>
+      <section class="analysis-section history-overview">
+        <div class="analysis-title"><h2>Temps actif</h2><div class="zoom-controls"><button id="history-zoom-in" title="Afficher moins de jours" aria-label="Zoom avant">＋</button><span id="history-range">7 jours</span><button id="history-zoom-out" title="Afficher plus de jours" aria-label="Zoom arrière">−</button><button id="history-zoom-all">Tout</button></div></div>
+        <div id="history-chart" class="history-chart"></div>
+      </section>
+    </section>
+
+    <section id="limits" class="panel">
+      <div id="limit-create" class="progressive-action panel-action-menu">
+        <button id="new-limit" class="primary" aria-expanded="false" aria-controls="limit-target-menu">Nouvelle limitation</button>
+        <div id="limit-type-menu" hidden></div>
+      </div>
+      <div id="limit-workflow" class="inline-workflow" hidden>
+        <div id="limit-validity-menu" class="choice-list analysis-choice-list" hidden>
+          <button data-limit-validity="permanent"><strong>Validité permanente</strong><small>La règle reste active sans date de fin</small></button>
+          <button data-limit-validity="period"><strong>Définir une période</strong><small>À partir d’une date, jusqu’à une date, ou les deux</small></button>
+          <button data-limit-back="types"><strong>← Retour</strong></button>
+        </div>
+        <div id="limit-target-menu" class="choice-list analysis-choice-list" hidden></div>
+        <form id="limit-validity-form" class="workflow-input-form" hidden>
+          <h3>Période de validité</h3>
+          <div class="time-range-fields">
+            <label>À partir du<input id="limit-valid-from" type="date"></label>
+            <label>À<input id="limit-valid-from-time" type="time"></label>
+          </div>
+          <div class="time-range-fields">
+            <label>Jusqu’au<input id="limit-valid-until" type="date"></label>
+            <label>À<input id="limit-valid-until-time" type="time"></label>
+          </div>
+          <small>Renseignez au moins une date avec son heure. Les deux bornes sont incluses.</small>
+          <button type="submit" class="primary">Continuer</button>
+          <button type="button" data-limit-back="validity">← Retour</button>
+        </form>
+        <form id="limit-custom-form" class="workflow-input-form" hidden>
+          <h3 id="limit-custom-title">Durée quotidienne</h3>
+          <label id="limit-custom-label" for="limit-custom-value">Temps autorisé par jour</label>
+          <div class="duration-fields">
+            <input id="limit-custom-value" type="number" min="0.01" step="0.01" aria-label="Valeur de la durée" required>
+            <select id="limit-custom-unit" aria-label="Unité de la durée"><option value="minutes">Minutes</option><option value="hours">Heures</option></select>
+          </div>
+          <small id="limit-custom-help">Cette durée est comptée uniquement quand la limitation est active.</small>
+          <button type="submit" class="primary">Continuer</button>
+          <button id="limit-custom-back" type="button" data-limit-back="duration">← Retour</button>
+        </form>
+        <form id="limit-cutoff-form" class="workflow-input-form" hidden>
+          <h3>Planification de la limitation</h3>
+          <div class="time-range-fields">
+            <label>De<input id="limit-schedule-start" type="time"></label>
+            <label>À<input id="limit-schedule-end" type="time"></label>
+          </div>
+          <small>Si une plage est indiquée, la durée est comptée et appliquée uniquement pendant cette plage, chaque jour de la période de validité.</small>
+          <label>Interdire après cette heure (facultatif)<input id="limit-cutoff-time" type="time"></label>
+          <small>Exemple : 23:00. Le préavis défini à l’étape précédente sera utilisé.</small>
+          <button type="submit" class="primary">Enregistrer</button>
+          <button type="button" data-limit-back="extension">← Retour</button>
+        </form>
+        <form id="computer-range-form" class="workflow-input-form" hidden>
+          <label>Heure de début<input id="computer-range-start-time" type="time" required></label>
+          <label>Heure de fin<input id="computer-range-end-time" type="time" required></label>
+          <small>La limitation sera active entre ces deux heures pendant toute sa période de validité.</small>
+          <button type="submit" class="primary">Enregistrer</button>
+          <button type="button" data-limit-back="validity">← Retour</button>
+        </form>
+      </div>
+      <div id="limits-list" class="cards"></div>
+    </section>
+
+    <section id="notifications" class="panel">
+      <div id="notification-create" class="progressive-action panel-action-menu">
+        <button id="new-notification" class="primary" aria-expanded="false" aria-controls="notification-type-menu">Nouvelle notification</button>
+        <div id="notification-type-menu" class="choice-list compact-choice-list" hidden>
+          <button data-notification-type="limited_app_start"><strong>Au démarrage d’une application limitée</strong></button>
+          <button data-notification-type="limit_change"><strong>Si une limite est ajoutée ou modifiée</strong></button>
+          <button data-notification-type="limit_warning"><strong>Prévenir avant la limite</strong></button>
+          <button data-notification-type="computer_block_change"><strong>Si une limitation de l’ordinateur est modifiée</strong></button>
+          <button data-notification-type="pwa_login"><strong>Si quelqu’un se connecte à la PWA</strong></button>
+          <button data-notification-type="usage_threshold"><strong>Au dépassement d’un seuil</strong></button>
+          <button data-workflow-cancel="notification"><strong>← Retour</strong></button>
+        </div>
+      </div>
+      <div id="notification-workflow" class="inline-workflow" hidden>
+        <div id="notification-threshold-type-menu" class="choice-list analysis-choice-list" hidden>
+          <p class="choice-heading">Type de seuil</p>
+          <button data-notification-threshold-mode="duration"><strong>Durée d’utilisation</strong><small>Prévenir après une durée définie</small></button>
+          <button data-notification-threshold-mode="time"><strong>Horaire</strong><small>Prévenir après une certaine heure</small></button>
+          <button data-notification-back="types"><strong>← Retour</strong></button>
+        </div>
+        <div id="notification-target-type-menu" hidden></div>
+        <div id="notification-target-menu" class="choice-list analysis-choice-list" hidden></div>
+        <div id="notification-threshold-menu" class="choice-list analysis-choice-list" hidden></div>
+        <form id="notification-duration-form" class="workflow-input-form" hidden>
+          <h3>Seuil de durée</h3>
+          <label for="notification-duration-value">Prévenir après</label>
+          <div class="duration-fields">
+            <input id="notification-duration-value" type="number" min="0.01" step="0.01" required>
+            <select id="notification-duration-unit"><option value="minutes">Minutes</option><option value="hours">Heures</option></select>
+          </div>
+          <button type="submit" class="primary">Continuer</button>
+          <button type="button" data-notification-back="target">← Retour</button>
+        </form>
+        <form id="notification-hour-form" class="workflow-input-form" hidden>
+          <h3>Seuil horaire</h3>
+          <label for="notification-after-time">Prévenir après cette heure</label>
+          <input id="notification-after-time" type="time" required>
+          <button type="submit" class="primary">Continuer</button>
+          <button type="button" data-notification-back="threshold-type">← Retour</button>
+        </form>
+        <div id="notification-validity-menu" class="choice-list analysis-choice-list" hidden>
+          <p class="choice-heading">Validité de la notification</p>
+          <button data-notification-validity="permanent"><strong>Validité permanente</strong><small>La notification reste active sans date de fin</small></button>
+          <button data-notification-validity="period"><strong>Définir une période</strong><small>À partir d’une date, jusqu’à une date, ou les deux</small></button>
+          <button data-notification-back="threshold-value"><strong>← Retour</strong></button>
+        </div>
+        <form id="notification-validity-form" class="workflow-input-form" hidden>
+          <h3>Période de validité</h3>
+          <div class="time-range-fields">
+            <label>À partir du<input id="notification-valid-from" type="date"></label>
+            <label>À<input id="notification-valid-from-time" type="time"></label>
+            <label>Jusqu’au<input id="notification-valid-until" type="date"></label>
+            <label>À<input id="notification-valid-until-time" type="time"></label>
+          </div>
+          <small>Une notification arrivée en fin de validité sera supprimée automatiquement.</small>
+          <button type="submit" class="primary">Enregistrer</button>
+          <button type="button" data-notification-back="validity">← Retour</button>
+        </form>
+        <div id="notification-weekdays-menu" class="choice-list analysis-choice-list" hidden></div>
+        <div id="notification-warning-menu" class="choice-list analysis-choice-list" hidden></div>
+        <form id="notification-warning-form" class="workflow-input-form" hidden>
+          <label id="notification-warning-label" for="notification-warning-value">Prévenir avant la limite</label>
+          <div class="duration-fields">
+            <input id="notification-warning-value" type="number" min="0.01" step="0.01" aria-label="Valeur du délai" required>
+            <select id="notification-warning-unit" aria-label="Unité du délai"><option value="minutes">Minutes</option><option value="hours">Heures</option></select>
+          </div>
+          <button id="notification-warning-submit" type="submit" class="primary">Ajouter</button>
+          <button type="button" data-notification-back="target">← Retour</button>
+        </form>
+      </div>
+      <div id="notifications-list" class="cards"></div>
+    </section>
+
+    <section id="settings" class="panel settings-sections">
+      <section class="settings-section" aria-labelledby="general-settings-title">
+        <h2 id="general-settings-title">Options générales</h2>
+        <div class="settings-card">
+        <label for="language-choice"><strong>Langue</strong><small>Langue du programme principal</small></label>
+        <select id="language-choice">
+          <option value="auto">Automatique (langue système)</option>
+          <option value="fr">Français</option>
+          <option value="en">English</option>
+        </select>
+        <p id="language-status">Le changement sera appliqué au prochain redémarrage d’Usage Guard.</p>
+        <label for="theme-choice"><strong>Thème</strong><small>Apparence de l’interface</small></label>
+        <select id="theme-choice">
+          <option value="auto">Automatique (thème système)</option>
+          <option value="dark">Sombre</option>
+          <option value="light">Clair</option>
+        </select>
+        </div>
+      </section>
+      <section class="settings-section" aria-labelledby="users-settings-title">
+        <h2 id="users-settings-title">Utilisateurs</h2>
+        <div id="remote-account" class="settings-card account-card" hidden>
+        <div><strong>Compte distant</strong><small id="remote-username"></small></div>
+        <button id="logout-button">Se déconnecter</button>
+        <form id="password-form" class="settings-form">
+          <h2>Changer le mot de passe</h2>
+          <label>Mot de passe actuel<input name="current_password" type="password" autocomplete="current-password" required></label>
+          <label>Nouveau mot de passe<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label>
+          <label>Confirmer<input name="confirmation" type="password" autocomplete="new-password" minlength="10" required></label>
+          <button type="submit" class="primary">Changer le mot de passe</button>
+        </form>
+        </div>
+        <div id="admin-user-management" class="settings-card account-card admin-card" hidden>
+        <div><strong>Administration</strong><small>Rôles et droits des utilisateurs distants</small></div>
+        <div id="admin-users" class="user-list"><p>Chargement…</p></div>
+        </div>
+        <div id="admin-access-note" class="settings-card account-card" hidden>
+        <div><strong>Administration</strong><small>Votre compte n’est pas administrateur. Ce rôle peut être attribué depuis la PWA locale sur le PC Usage Guard.</small></div>
+        </div>
+        <div id="local-user-management" class="settings-card account-card" hidden>
+        <div><strong>Utilisateurs distants</strong><small>Création autorisée uniquement depuis ce PC</small></div>
+        <div id="remote-users" class="user-list"><p>Chargement…</p></div>
+        <div class="user-actions"><button id="refresh-users">Actualiser</button><button id="create-user" class="primary">Créer un utilisateur</button></div>
+        </div>
+      </section>
+      <section class="settings-section" aria-labelledby="defaults-settings-title">
+        <h2 id="defaults-settings-title">Valeurs par défaut</h2>
+        <div class="settings-card">
+          <div class="settings-subheading"><strong>Notifications</strong><small>Réglages appliqués aux nouvelles limitations</small></div>
+          <label for="default-limit-warning"><strong>Préavis avant la fin du temps autorisé</strong><small>Choisissez une valeur et son unité</small></label>
+          <div class="duration-fields">
+            <input id="default-limit-warning" type="number" min="0.01" step="0.01" value="5" aria-label="Valeur du préavis par défaut">
+            <select id="default-limit-warning-unit" aria-label="Unité du préavis par défaut"><option value="minutes">Minutes</option><option value="hours">Heures</option></select>
+          </div>
+        </div>
+      </section>
+    </section>
+
+  </main>
+
+  <dialog id="action-dialog"><form method="dialog"><div class="dialog-head"><h2 id="action-title">Modifier</h2><button type="submit" value="cancel" formnovalidate class="icon-button" aria-label="Fermer">×</button></div><div id="action-fields"></div><div class="dialog-actions"><button type="submit" value="cancel" formnovalidate>Retour</button><button type="submit" id="action-submit" value="default" class="primary">Enregistrer</button></div></form></dialog>
+  <div id="context-menu" class="context-menu" role="menu" hidden></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="i18n.js?v=1.044"></script>
+  <script src="app.js?v=1.044"></script>
+</body>
+</html>

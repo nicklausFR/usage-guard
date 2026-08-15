@@ -2,6 +2,8 @@ import platform
 import json
 import re
 import time
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from urllib.error import URLError
@@ -116,6 +118,10 @@ class ActivityProbe:
                 return self._finish_context(context, fallback_context)
         return self._finish_context(fallback_context, fallback_context)
 
+    def running_applications(self):
+        """Return visible desktop applications, including those already open."""
+        return self._fallback.running_applications()
+
     def _browser_bridge_context(self, fallback_context):
         tab = self._current_bridge_tab()
         if tab is None:
@@ -154,7 +160,10 @@ class ActivityProbe:
             context.app_name = "explorer.exe"
         context.has_recent_input = fallback_context.has_recent_input
         context.idle_seconds = fallback_context.idle_seconds
-        context.is_afk = not context.has_recent_input
+        # Keep Windows' real AFK state (120 s by default). ``has_recent_input``
+        # is intentionally much shorter and must not turn reading/thinking
+        # time into AFK time after only a few seconds.
+        context.is_afk = fallback_context.is_afk
         context.is_video_playing = (
             not context.has_recent_input
             and (
@@ -208,10 +217,20 @@ class ActivityProbe:
         """Raw Windows media-session sources, used only by debug logging."""
         return self._media.playing_sources()
 
+    def media_session_states(self):
+        """Return every Windows media session and whether it is PLAYING."""
+        return self._media.session_states()
+
 
 class ActivityWatchProbe:
     def __init__(self):
-        self.base_url = str(getattr(config, "ACTIVITYWATCH_BASE_URL", "http://localhost:5600")).rstrip("/")
+        configured = str(getattr(config, "ACTIVITYWATCH_BASE_URL", "http://localhost:5600")).rstrip("/")
+        parsed = urlparse(configured)
+        self.base_url = (
+            configured
+            if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+            else "http://localhost:5600"
+        )
         self.timeout = float(getattr(config, "ACTIVITYWATCH_TIMEOUT_SECONDS", 0.1))
 
     def current(self):
@@ -264,7 +283,7 @@ class ActivityWatchProbe:
         return events if isinstance(events, list) else []
 
     def _get_json(self, path):
-        with urlopen(f"{self.base_url}{path}", timeout=self.timeout) as response:
+        with urlopen(f"{self.base_url}{path}", timeout=self.timeout) as response:  # nosec B310
             return json.loads(response.read().decode("utf-8"))
 
 
@@ -273,6 +292,66 @@ class WindowsActivityProbe:
         if platform.system() == "Windows":
             return self._windows_current()
         return ActiveContext(is_afk=True)
+
+    def running_applications(self):
+        """Return one entry per executable owning a visible titled window."""
+        if platform.system() != "Windows":
+            return {}
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            applications = {}
+            ignored_hosts = {
+                "applicationframehost.exe",
+                "lockapp.exe",
+                "searchhost.exe",
+                "shellexperiencehost.exe",
+                "startmenuexperiencehost.exe",
+                "textinputhost.exe",
+            }
+            callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+            def inspect_window(hwnd, _):
+                if not user32.IsWindowVisible(hwnd):
+                    return True
+                length = user32.GetWindowTextLengthW(hwnd)
+                if length <= 0:
+                    return True
+                title_buffer = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, title_buffer, length + 1)
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                handle = kernel32.OpenProcess(0x1000, False, pid.value)
+                if not handle:
+                    return True
+                try:
+                    path_buffer = ctypes.create_unicode_buffer(1024)
+                    size = wintypes.DWORD(len(path_buffer))
+                    if not kernel32.QueryFullProcessImageNameW(
+                        handle, 0, path_buffer, ctypes.byref(size)
+                    ):
+                        return True
+                    executable = Path(path_buffer.value).name
+                    if executable.casefold() == "usage-guard.exe" or executable.casefold() in ignored_hosts:
+                        return True
+                    key = executable.casefold()
+                    applications.setdefault(
+                        key,
+                        {"executable": executable, "label": Path(executable).stem},
+                    )
+                finally:
+                    kernel32.CloseHandle(handle)
+                return True
+
+            user32.EnumWindows(callback_type(inspect_window), 0)
+            return applications
+        except Exception:
+            # None means that collection failed; callers retain the last good
+            # inventory instead of incorrectly closing every open program.
+            return None
 
     def _windows_current(self) -> ActiveContext:
         try:
@@ -358,7 +437,9 @@ class WindowsMediaProbe:
         self._last_check = 0.0
         self._last_key = None
         self._last_result = False
-        self._last_sources = []
+        self._last_sessions = {}
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="media-probe")
+        self._pending_query = None
 
     def is_playing_for(self, app_name, url=""):
         if not self._available or not app_name:
@@ -368,13 +449,36 @@ class WindowsMediaProbe:
         return any(_same_application(app_name, source) for source in self.playing_sources())
 
     def playing_sources(self):
+        return [
+            source for source, is_playing in self.session_states().items()
+            if is_playing
+        ]
+
+    def session_states(self):
         if not self._available:
-            return []
+            return {}
+
+        # The WinRT request can occasionally stall.  It must never run on the
+        # Qt GUI thread, otherwise tray clicks, menus, and Ctrl+C stop being
+        # processed while Windows is resolving media sessions.
+        if self._pending_query is not None and self._pending_query.done():
+            try:
+                self._last_sessions = self._pending_query.result()
+            except Exception:
+                self._last_sessions = {}
+            self._pending_query = None
+
         now = time.monotonic()
         if now - self._last_check < 3:
-            return list(self._last_sources)
+            return dict(self._last_sessions)
         self._last_check = now
-        self._last_sources = []
+
+        if self._pending_query is None:
+            self._pending_query = self._executor.submit(self._query_sessions)
+        return dict(self._last_sessions)
+
+    @staticmethod
+    def _query_sessions():
         try:
             import asyncio
             from winrt.windows.media.control import (
@@ -386,15 +490,15 @@ class WindowsMediaProbe:
                 manager = await GlobalSystemMediaTransportControlsSessionManager.request_async()
                 return manager.get_sessions()
 
-            self._last_sources = [
-                str(session.source_app_user_model_id)
-                for session in asyncio.run(get_sessions())
-                if session.get_playback_info().playback_status
-                == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
-            ]
+            sessions = {}
+            for session in asyncio.run(get_sessions()):
+                sessions[str(session.source_app_user_model_id)] = (
+                    session.get_playback_info().playback_status
+                    == GlobalSystemMediaTransportControlsSessionPlaybackStatus.PLAYING
+                )
+            return sessions
         except Exception:
-            pass
-        return list(self._last_sources)
+            return {}
 
 
 def _same_application(app_name, source_app_user_model_id):
@@ -440,7 +544,7 @@ def _is_usage_guard_window(context):
     """Recognize the control window in packaged and development builds."""
     executable = str(context.app_name or "").rsplit("\\", 1)[-1].lower()
     title = str(context.window_title or "").strip().casefold()
-    return executable == "usage-guard.exe" or title == "usage monitor"
+    return executable == "usage-guard.exe" or title in {"usage guard", "usage monitor"}
 
 
 def _is_minimized_window(window_handle):
@@ -563,7 +667,7 @@ def _is_system_popup_title(title):
 
 def _is_regular_browser_tab(title):
     title_lower = str(title or "").casefold().strip()
-    return title_lower.endswith((" - brave", " â€“ brave", " – brave"))
+    return title_lower.endswith((" - brave", " – brave"))
 
 
 def _host_url_from_title(title):

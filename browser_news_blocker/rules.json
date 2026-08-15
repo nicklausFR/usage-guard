@@ -1,0 +1,11 @@
+[
+  {"id": 1, "priority": 1, "action": {"type": "redirect", "redirect": {"extensionPath": "/blocked.html"}}, "condition": {"urlFilter": "||lemonde.fr^", "resourceTypes": ["main_frame"]}},
+  {"id": 2, "priority": 1, "action": {"type": "redirect", "redirect": {"extensionPath": "/blocked.html"}}, "condition": {"urlFilter": "||lefigaro.fr^", "resourceTypes": ["main_frame"]}},
+  {"id": 3, "priority": 1, "action": {"type": "redirect", "redirect": {"extensionPath": "/blocked.html"}}, "condition": {"urlFilter": "||liberation.fr^", "resourceTypes": ["main_frame"]}},
+  {"id": 4, "priority": 1, "action": {"type": "redirect", "redirect": {"extensionPath": "/blocked.html"}}, "condition": {"urlFilter": "||franceinfo.fr^", "resourceTypes": ["main_frame"]}},
+  {"id": 5, "priority": 1, "action": {"type": "redirect", "redirect": {"extensionPath": "/blocked.html"}}, "condition": {"urlFilter": "||bfmtv.com^", "resourceTypes": ["main_frame"]}},
+  {"id": 6, "priority": 1, "action": {"type": "redirect", "redirect": {"extensionPath": "/blocked.html"}}, "condition": {"urlFilter": "||20minutes.fr^", "resourceTypes": ["main_frame"]}},
+  {"id": 7, "priority": 1, "action": {"type": "redirect", "redirect": {"extensionPath": "/blocked.html"}}, "condition": {"urlFilter": "||mediapart.fr^", "resourceTypes": ["main_frame"]}},
+  {"id": 8, "priority": 1, "action": {"type": "redirect", "redirect": {"extensionPath": "/blocked.html"}}, "condition": {"urlFilter": "||bbc.com^", "resourceTypes": ["main_frame"]}},
+  {"id": 9, "priority": 1, "action": {"type": "redirect", "redirect": {"extensionPath": "/blocked.html"}}, "condition": {"urlFilter": "||cnn.com^", "resourceTypes": ["main_frame"]}}
+]

@@ -1,0 +1,19 @@
+msgid ""
+msgstr ""
+"Language: fr\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "extensionName"
+msgstr "Usage Guard — liaison navigateur"
+
+msgid "extensionDescription"
+msgstr "Relie les onglets et les limites web à Usage Guard."
+
+msgid "timeElapsed"
+msgstr "Temps écoulé"
+
+msgid "extensionPending"
+msgstr "Rallonge en cours…"
+
+msgid "getExtension"
+msgstr "Obtenir une rallonge exceptionnelle de $1"

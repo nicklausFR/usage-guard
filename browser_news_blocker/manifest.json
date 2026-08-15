@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Usage Guard — Blocage actualités",
+  "version": "1.0.0",
+  "description": "Avertit lors de la visite de sites d'actualité.",
+  "permissions": ["notifications", "storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{
+    "matches": ["http://*/*", "https://*/*"],
+    "js": ["reminder.js"],
+    "run_at": "document_idle"
+  }],
+  "options_page": "options.html"
+}

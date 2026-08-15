@@ -1,6 +1,11 @@
 POLL_INTERVAL_MS: 1000
-WINDOW_WIDTH: 420
-WINDOW_HEIGHT: 520
+# Test rapide : 15 secondes au premier plan, une rallonge unique de 15
+# secondes et un avertissement 5 secondes avant le blocage.
+POTPLAYER_LIMIT_SECONDS: 15
+POTPLAYER_EXTENSION_SECONDS: 15
+POTPLAYER_WARNING_SECONDS: 5
+WINDOW_WIDTH: 680
+WINDOW_HEIGHT: 760
 # L'application au premier plan reste comptée brièvement après une saisie
 # clavier/souris. Une vidéo en lecture est traitée séparément.
 RECENT_INPUT_SECONDS: 3
@@ -10,6 +15,9 @@ VIDEO_PLAYER_APPS: [vlc.exe, mpv.exe, potplayermini64.exe, mpc-hc64.exe]
 VIDEO_URL_PATTERNS: [youtube.com, netflix.com, primevideo.com, twitch.tv, vimeo.com, dailymotion.com]
 # Les domaines visités dans Brave sont affichés comme sous-catégories de Brave.
 BROWSER_APPS: [brave.exe]
+# Les adresses locales sont suivies comme applications non classées,
+# plutôt que comme navigation Internet.
+LOCALHOST_CATEGORY: Applications non classées
 AFK_AFTER_SECONDS: 120
 AUTOSTART_WITH_WINDOWS: true
 ACTIVITYWATCH_ENABLED: false
@@ -23,4 +31,23 @@ ACTIVITYWATCH_AUTOSTART_HEADLESS: true
 ACTIVITYWATCH_INSTALL_DIR: ''
 # Temporary diagnostics: records media detection decisions in
 # dist/usage-guard-debug.log when running the packaged executable.
-DEBUG_LOGGING: true
+DEBUG_LOGGING: false
+# Journal brut expérimental : transitions uniquement, plus un point de contrôle
+# périodique. Il ne contient ni texte saisi, ni coordonnées, ni URL complète.
+OBSERVATION_JOURNAL_ENABLED: false
+OBSERVATION_HEARTBEAT_SECONDS: 60
+OBSERVATION_RETENTION_DAYS: 7
+# L'interface principale est la PWA locale ouverte depuis l'icône de systray.
+# À distance, la PWA de production parlera au backend, jamais directement au PC.
+REMOTE_API_ENABLED: true
+REMOTE_API_HOST: 127.0.0.1
+# Le port fait partie de l'identité web : 127.0.0.1:8766 et :8767 sont deux
+# PWA distinctes (installation, cache, stockage local et jeton séparés).
+REMOTE_API_PORT: 8766
+# Le client ne fait que des requêtes sortantes HTTPS vers le backend. Chaque
+# poste reçoit son identifiant et son jeton propre au moment de l'association.
+BACKEND_ENABLED: false
+BACKEND_BASE_URL: ''
+BACKEND_DEVICE_ID: ''
+BACKEND_POLL_SECONDS: 15
+LANGUAGE: auto

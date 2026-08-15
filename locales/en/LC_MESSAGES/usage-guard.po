@@ -1,0 +1,194 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: Usage Guard\n"
+"Language: en\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "Usage Guard · aujourd’hui"
+msgstr "Usage Guard · today"
+
+msgid "Temps actif : {duration}"
+msgstr "Active time: {duration}"
+
+msgid "Aucune limite active"
+msgstr "No active limit"
+
+msgid "reste {duration}"
+msgstr "{duration} remaining"
+
+msgid "Usage Guard — suivi actif"
+msgstr "Usage Guard — active tracking"
+
+msgid "Ouvrir Usage Guard"
+msgstr "Open Usage Guard"
+
+msgid "Quitter"
+msgstr "Quit"
+
+msgid "Aujourd’hui"
+msgstr "Today"
+
+msgid "Choisir un jour…"
+msgstr "Choose a day…"
+
+msgid "Depuis le début"
+msgstr "Since the beginning"
+
+msgid "Choisir le jour à afficher"
+msgstr "Choose the day to display"
+
+msgid "Ordinateur"
+msgstr "Computer"
+
+msgid "Session Windows"
+msgstr "Windows session"
+
+msgid "Utilisation active"
+msgstr "Active use"
+
+msgid "Usage passif"
+msgstr "Passive use"
+
+msgid "Usage"
+msgstr "Usage"
+
+msgid "Analyse"
+msgstr "Analysis"
+
+msgid "Limites"
+msgstr "Limits"
+
+msgid "Paramètres"
+msgstr "Settings"
+
+msgid "Langue de l’application"
+msgstr "Application language"
+
+msgid "Automatique (langue système)"
+msgstr "Automatic (system language)"
+
+msgid "Le changement sera appliqué au prochain redémarrage d’Usage Guard."
+msgstr "The change will be applied the next time Usage Guard starts."
+
+msgid "Langue enregistrée. Redémarrez Usage Guard pour l’appliquer."
+msgstr "Language saved. Restart Usage Guard to apply it."
+
+msgid "Date précise"
+msgstr "Specific date"
+
+msgid "Cumul sur une durée"
+msgstr "Total over a period"
+
+msgid "Activité"
+msgstr "Activity"
+
+msgid "Durée"
+msgstr "Duration"
+
+msgid "Limites d’utilisation"
+msgstr "Usage limits"
+
+msgid "Application"
+msgstr "Application"
+
+msgid "Limite"
+msgstr "Limit"
+
+msgid "Rallonge"
+msgstr "Extension"
+
+msgid "Alerte"
+msgstr "Warning"
+
+msgid "État aujourd’hui"
+msgstr "Status today"
+
+msgid "Ajouter une limite…"
+msgstr "Add a limit…"
+
+msgid "Modifier…"
+msgstr "Edit…"
+
+msgid "Réinitialiser aujourd’hui"
+msgstr "Reset today"
+
+msgid "Supprimer"
+msgstr "Delete"
+
+msgid "Applications exclues…"
+msgstr "Excluded applications…"
+
+msgid "Limite atteinte"
+msgstr "Limit reached"
+
+msgid "Limite d’utilisation atteinte"
+msgstr "Usage limit reached"
+
+msgid "Fermer l’application"
+msgstr "Close application"
+
+msgid "Réduire"
+msgstr "Minimize"
+
+msgid "{label} — limite atteinte"
+msgstr "{label} — limit reached"
+
+msgid "Fermer {label}"
+msgstr "Close {label}"
+
+msgid "Obtenir une rallonge exceptionnelle de {seconds} sec"
+msgstr "Get an exceptional extension of {seconds} sec"
+
+msgid "Rallonge déjà utilisée sur les dernières 24 h"
+msgstr "Extension already used within the last 24 hours"
+
+msgid "{label} est bloquée. Une rallonge exceptionnelle est disponible."
+msgstr "{label} is blocked. An exceptional extension is available."
+
+msgid "{label} est bloquée sur la période de 24 h."
+msgstr "{label} is blocked for the 24-hour period."
+
+msgid "Limitations aujourd’hui"
+msgstr "Today's limitations"
+
+msgid "Aucune limitation aujourd’hui"
+msgstr "No limitation today"
+
+msgid "Tout l’ordinateur"
+msgstr "Entire computer"
+
+msgid "actif jusqu’à {time}"
+msgstr "active until {time}"
+
+msgid "prévu de {start} à {end}"
+msgstr "scheduled from {start} to {end}"
+
+msgid "hors plage · {start}–{end}"
+msgstr "outside schedule · {start}–{end}"
+
+msgid "active"
+msgstr "active"
+
+msgid "configurée"
+msgstr "configured"
+
+msgid "Toutes les activités"
+msgstr "All activities"
+
+msgid "Catégorie : {name}"
+msgstr "Category: {name}"
+
+msgid "Application : {name}"
+msgstr "Application: {name}"
+
+msgid "Ordinateur indisponible — Usage Guard"
+msgstr "Computer unavailable — Usage Guard"
+
+msgid "Utilisation de l’ordinateur bloquée"
+msgstr "Computer use blocked"
+
+msgid "Lever l’interdiction"
+msgstr "Remove restriction"
+
+msgid "Blocage actif jusqu’au {time}."
+msgstr "Restriction active until {time}."

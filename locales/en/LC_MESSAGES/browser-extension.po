@@ -1,0 +1,19 @@
+msgid ""
+msgstr ""
+"Language: en\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "extensionName"
+msgstr "Usage Guard Browser Bridge"
+
+msgid "extensionDescription"
+msgstr "Connects browser tabs and web limits to Usage Guard."
+
+msgid "timeElapsed"
+msgstr "Time elapsed"
+
+msgid "extensionPending"
+msgstr "Extension pending…"
+
+msgid "getExtension"
+msgstr "Get an exceptional extension of $1"

@@ -1,0 +1,6 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: Usage Guard\n"
+"Language: fr\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+

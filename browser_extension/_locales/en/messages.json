@@ -1,0 +1,17 @@
+{
+  "extensionName": {
+    "message": "Usage Guard Browser Bridge"
+  },
+  "extensionDescription": {
+    "message": "Connects browser tabs and web limits to Usage Guard."
+  },
+  "timeElapsed": {
+    "message": "Time elapsed"
+  },
+  "extensionPending": {
+    "message": "Extension pending…"
+  },
+  "getExtension": {
+    "message": "Get an exceptional extension of $1"
+  }
+}

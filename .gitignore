@@ -4,6 +4,20 @@ __pycache__/
 build/
 dist/
 *.spec
+build_exe.py
+tests/test_build_exe.py
+_limit_test.json
+usage_guard_backend/deploy-server.ps1
+usage_guard_backend/README.md
+usage_guard_backend/SERVER_SETUP.md
+usage_guard_backend/apache-usage-guard.conf
+usage_guard_backend/backend.env.example
+usage_guard_backend/backend.json.example
+usage_guard_backend/fail2ban-apache-auth.local
+usage_guard_backend/fail2ban-usage-guard.conf
+usage_guard_backend/fail2ban-usage-guard.local
+usage_guard_backend/setup-server.sh
+usage_guard_backend/usage-guard-backend.service
 
 *.log
 usage.dat
@@ -12,9 +26,12 @@ jokers.json
 activity.json
 activity.json.tmp
 *.corrupt
+observations/
 
 .vscode/
 .agents/
 .codex/
 LOCAL_NOTES.md
-build_exe.py
+remote-api-token.txt
+backend.json
+relay_client.py

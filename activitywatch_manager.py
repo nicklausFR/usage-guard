@@ -2,6 +2,7 @@ import subprocess
 import time
 from pathlib import Path
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from usage_guard import config
@@ -12,7 +13,13 @@ class ActivityWatchManager:
         self.processes = []
         install_dir = getattr(config, "ACTIVITYWATCH_INSTALL_DIR", "")
         self.install_dir = Path(install_dir) if install_dir else _default_install_dir()
-        self.base_url = str(getattr(config, "ACTIVITYWATCH_BASE_URL", "http://localhost:5600")).rstrip("/")
+        configured = str(getattr(config, "ACTIVITYWATCH_BASE_URL", "http://localhost:5600")).rstrip("/")
+        parsed = urlparse(configured)
+        self.base_url = (
+            configured
+            if parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+            else "http://localhost:5600"
+        )
 
     def ensure_running(self):
         if not bool(getattr(config, "ACTIVITYWATCH_AUTOSTART_HEADLESS", True)):
@@ -29,7 +36,7 @@ class ActivityWatchManager:
 
     def is_server_available(self):
         try:
-            with urlopen(f"{self.base_url}/api/0/buckets/", timeout=0.5):
+            with urlopen(f"{self.base_url}/api/0/buckets/", timeout=0.5):  # nosec B310
                 return True
         except (OSError, URLError, TimeoutError, ValueError):
             return False

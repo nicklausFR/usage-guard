@@ -1,0 +1,17 @@
+{
+  "extensionName": {
+    "message": "Usage Guard — liaison navigateur"
+  },
+  "extensionDescription": {
+    "message": "Relie les onglets et les limites web à Usage Guard."
+  },
+  "timeElapsed": {
+    "message": "Temps écoulé"
+  },
+  "extensionPending": {
+    "message": "Rallonge en cours…"
+  },
+  "getExtension": {
+    "message": "Obtenir une rallonge exceptionnelle de $1"
+  }
+}
