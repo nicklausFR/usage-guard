@@ -154,6 +154,19 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn('node.kind==="inactive"?!collapsedTreeNodes.has(node.id)', script)
         self.assertIn('const structuralTreeKinds=new Set(["category"', script)
 
+    def test_remote_settings_are_reserved_for_administrators(self):
+        root = Path(__file__).parents[1] / "pwa"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="general-settings-section"', markup)
+        self.assertIn('id="users-settings-section"', markup)
+        self.assertIn('id="defaults-settings-section"', markup)
+        self.assertIn('$("#general-settings-section").hidden=remoteMode', script)
+        self.assertIn('$("#users-settings-section").hidden=remoteMode&&!isRemoteAdmin', script)
+        self.assertIn('$("#defaults-settings-section").hidden=remoteMode', script)
+        self.assertIn('$("#remote-account").hidden=!isRemoteAdmin', script)
+
     def test_web_targets_use_a_badge_instead_of_a_duplicate_browser_category(self):
         root = Path(__file__).parents[1] / "pwa"
         script = (root / "app.js").read_text(encoding="utf-8")
