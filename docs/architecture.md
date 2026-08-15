@@ -1,147 +1,143 @@
-# Architecture cible de Usage Guard
+# Target architecture
 
-## Statut
+## Status
 
-Décision validée. Ce document sert de référence aux futures tâches Codex et aux évolutions du projet.
+Approved direction. This document guides future implementation work and architectural decisions.
 
-## Objectif
+## Goal
 
-Rendre les limitations sensiblement difficiles à contourner pour un utilisateur Windows standard, sans chercher une protection invulnérable face à un administrateur local et sans réécrire l'application existante.
+Make Usage Guard meaningfully difficult for a standard Windows user to bypass, without claiming protection against a local administrator or rewriting the existing application.
 
-Le produit vise une seule machine surveillée, un seul utilisateur limité et quelques utilisateurs distants. L'architecture doit donc rester simple.
+The intended deployment has one monitored computer, one restricted user, and a small number of authorized remote users. The design should remain proportionate to that scope.
 
-## Principe général
+## Overview
 
-Usage Guard est séparé en deux processus :
+Usage Guard is split into two processes:
 
-1. **UsageGuard Service**, service Windows et autorité de confiance ;
-2. **UsageGuard Desktop**, application de session conservant la détection Windows, Qt, le tray et les overlays.
+1. **UsageGuard Service**, the trusted Windows service;
+2. **UsageGuard Desktop**, the user-session application responsible for Windows activity detection, Qt, the system tray, and blocking overlays.
 
-L'extension du navigateur reste un capteur et un mécanisme d'affichage du blocage. Elle ne décide jamais des droits accordés.
+The browser extension remains a sensor and presentation layer. It never decides which permissions or extensions are granted.
 
 ```text
-Utilisateurs distants / backend
-              |
-              v
-      UsageGuard Service
-      - politiques et compteurs
-      - stockage protégé
-      - décisions autorisé/bloqué
-      - surveillance du Desktop
-              ^
-              | IPC local
-              v
-      UsageGuard Desktop
-      - ActivityProbe
-      - interface Qt et tray
-      - overlays
-      - observation de la session
-              ^
-              | Native Messaging à terme
-              v
-      Extension navigateur gérée
+Authorized remote users / backend
+                 |
+                 v
+         UsageGuard Service
+         - policies and counters
+         - protected storage
+         - allow/block decisions
+         - Desktop supervision
+                 ^
+                 | local IPC
+                 v
+         UsageGuard Desktop
+         - ActivityProbe
+         - Qt UI and system tray
+         - blocking overlays
+         - session observation
+                 ^
+                 | Native Messaging (target)
+                 v
+         Managed browser extension
 ```
 
 ## UsageGuard Service
 
-Le service est installé une fois avec élévation administrateur. Il fonctionne ensuite indépendamment du compte utilisateur limité.
+The service is installed once with administrator elevation and then runs independently of the restricted account.
 
-Il est seul responsable de :
+It is solely responsible for:
 
-- conserver les politiques et les compteurs de limites ;
-- décider si une application ou un site est autorisé ;
-- accorder une rallonge validée ;
-- recevoir les commandes du backend ;
-- stocker l'état sous `%ProgramData%\Usage Guard` avec des ACL adaptées ;
-- détecter l'arrêt du Desktop, le relancer et signaler l'interruption ;
-- utiliser une horloge monotone pour les durées et détecter les changements incohérents de l'heure système.
+- storing policies and limit counters;
+- deciding whether an application or website is allowed;
+- granting authorized extensions;
+- receiving commands from the backend;
+- storing protected state under `%ProgramData%\Usage Guard` with appropriate ACLs;
+- detecting, reporting, and recovering from Desktop termination;
+- using monotonic time for durations and detecting inconsistent system-clock changes.
 
-Le service ne contient pas de composants Qt et ne tente pas d'afficher directement une interface dans la session Windows.
+The service has no Qt dependency and does not display UI directly in the interactive Windows session.
 
 ## UsageGuard Desktop
 
-Le processus Desktop réutilise autant que possible l'implémentation actuelle :
+The Desktop process reuses the existing implementation wherever practical:
 
-- détection de la fenêtre active et des sessions multimédias ;
-- intégration avec le navigateur ;
-- tray, notifications et PWA locale ;
-- overlays de blocage dans la session utilisateur.
+- foreground-window and media-session detection;
+- browser integration;
+- system tray, notifications, and local PWA;
+- blocking overlays in the user session.
 
-Il transmet les observations au service et applique la décision reçue. Il ne peut pas diminuer, supprimer ou réinitialiser une limite de production.
+It sends observations to the service and applies the returned decision. It cannot reduce, remove, or reset a production limit.
 
-La PWA locale peut consulter l'état. Les opérations diminuant la protection sont réservées aux utilisateurs distants autorisés.
+The local PWA may read state. Operations that reduce protection are reserved for authorized remote users.
 
-## Communication locale
+## Local communication
 
-La cible est un canal IPC Windows à surface réduite, de préférence un named pipe avec ACL explicites.
+The target is a small Windows IPC surface, preferably a named pipe with explicit ACLs.
 
-Le protocole doit distinguer :
+The versioned protocol separates:
 
-- les observations envoyées par le Desktop ;
-- la lecture de l'état ;
-- les décisions renvoyées par le service ;
-- les commandes d'administration, qui ne doivent pas être accessibles au compte limité.
+- observations sent by Desktop;
+- read-only state queries;
+- decisions returned by the service;
+- administrative commands unavailable to the restricted account.
 
-Les messages et le protocole sont versionnés. L'API HTTP locale existante peut être conservée temporairement pendant la migration, mais ne doit plus donner accès à une commande permettant de diminuer la protection.
+The existing local HTTP API may remain during migration, but it must not expose commands that reduce protection.
 
-## Extension navigateur
+## Browser extension
 
-L'extension est conservée pour obtenir les informations qu'une application Windows ne peut pas déterminer correctement : onglet actif, URL active et lecture multimédia dans le navigateur.
+The extension supplies information that a Windows application cannot reliably obtain: the active tab, active URL, and browser media playback.
 
-Son rôle est limité à :
+Its role is limited to:
 
-- transmettre l'onglet actif et les informations utiles ;
-- demander l'état d'une limite ;
-- afficher ou appliquer le blocage demandé.
+- reporting the active tab and relevant state;
+- requesting current limit state;
+- displaying or enforcing a block requested by Usage Guard.
 
-Elle ne peut jamais accorder une rallonge, remettre un compteur à zéro ou désactiver une limite.
+It cannot grant an extension, reset a counter, or disable a limit.
 
-En production :
+For managed deployments:
 
-- l'extension possède un identifiant stable ;
-- elle est installée de force par une politique Brave/Chromium placée dans `HKLM` ;
-- l'utilisateur standard ne peut ni la désactiver ni la supprimer ;
-- les profils invités et les profils non supervisés sont désactivés ;
-- les navigateurs sans extension de supervision sont bloqués comme applications ;
-- l'absence de heartbeat de l'extension provoque, après un court délai, le blocage du navigateur et un signalement distant.
+- the extension has a stable identifier;
+- a Brave/Chromium machine policy installs it;
+- the standard user cannot disable or remove it;
+- guest and unmanaged profiles are disabled;
+- unsupervised browsers are blocked as applications;
+- a missing extension heartbeat eventually blocks the browser and triggers a remote report.
 
-À court terme, le Browser Bridge HTTP peut être conservé avec authentification et vérification de l'origine. L'endpoint permettant actuellement de demander directement une rallonge doit être supprimé. À terme, la communication doit passer par Native Messaging, puis par l'IPC du service.
+The authenticated, origin-checked HTTP Browser Bridge may remain temporarily. The target design uses Native Messaging connected to the service IPC.
 
-## Développement et tests
+## Development and testing
 
-La logique métier doit être isolée dans un cœur Python sans dépendance directe à Qt, au service Windows ou au réseau.
+Business rules should live in a Python core without direct Qt, Windows-service, or network dependencies.
 
-Ce cœur accepte des adaptateurs :
+The core accepts adapters for:
 
-- adaptateur mémoire pour les tests unitaires ;
-- adaptateur local pour le développement rapide dans un seul processus ;
-- adaptateur IPC pour la production avec le service Windows.
+- in-memory unit tests;
+- fast single-process local development;
+- production IPC with the Windows service.
 
-Les tests unitaires utilisent une horloge simulée, un dossier temporaire et de faux adaptateurs. Seule une petite suite de tests d'intégration démarre réellement le service.
+Unit tests use a simulated clock, temporary storage, and fake adapters. Only a small integration suite starts the real service.
 
-L'environnement de développement est séparé de la production :
+Development and production remain isolated through separate instance names, IPC endpoints, data directories, and extension identifiers. A development instance cannot modify production service state.
 
-- nom d'instance, pipe, ports et dossier de données distincts ;
-- extension `Usage Guard Dev` avec un autre identifiant ;
-- impossibilité pour l'instance Dev de modifier l'état du service de production.
+Production protection may remain active during normal development. An explicit, logged maintenance window should cover installations or tests that require stopping the service.
 
-Le service de production peut continuer à protéger la machine pendant le développement normal. Une fenêtre de maintenance explicite, idéalement autorisée à distance et journalisée, permet les installations et essais nécessitant son arrêt.
+## Threat model
 
-## Modèle de menace retenu
+The design targets a standard Windows user and should resist simple bypasses such as terminating the tray application, editing local JSON, disabling the extension, calling a local API, or changing the clock.
 
-La protection vise un utilisateur Windows standard. Elle doit résister aux contournements simples : tuer l'application de tray, modifier un fichier JSON, désactiver l'extension, appeler une API locale ou changer l'heure.
+It does not claim indefinite resistance against a local administrator who can stop services, change ACLs, uninstall software, or boot another operating system. Administrative interruptions should instead be deliberate, explicit, logged, and remotely visible.
 
-Elle ne prétend pas résister indéfiniment à un administrateur local capable d'arrêter un service, changer les ACL, désinstaller le programme ou démarrer sur un autre système. Dans le contexte où le développeur possède aussi les droits administrateur, l'objectif complémentaire est de rendre les interruptions explicites, volontaires et visibles à distance.
+## Incremental migration
 
-## Migration progressive
+1. Authenticate the Browser Bridge and keep extension requests read-only.
+2. Remove protection-reducing operations from the local PWA.
+3. Extract limit rules into a testable Python core.
+4. Introduce the Windows service and minimal IPC.
+5. Move storage, counters, and decisions into the service.
+6. Add Desktop recovery and interruption reporting.
+7. Deploy the extension through managed browser policy.
+8. Replace the HTTP bridge with Native Messaging.
 
-1. Authentifier le Browser Bridge et supprimer toute rallonge accordée directement par l'extension.
-2. Interdire dans la PWA locale les opérations qui diminuent la protection.
-3. Extraire la logique des limites dans un cœur Python testable.
-4. Créer le service et son IPC minimal.
-5. Déplacer progressivement le stockage, les compteurs et les décisions dans le service.
-6. Ajouter le redémarrage du Desktop et les signalements d'interruption.
-7. Déployer l'extension gérée par politique navigateur.
-8. Remplacer le bridge HTTP par Native Messaging.
-
-Chaque étape doit conserver une application utilisable et une suite de tests simple ; la migration ne doit pas être une réécriture globale.
+Every step must leave the application usable and the test suite maintainable. The migration is incremental, not a full rewrite.

@@ -2,6 +2,7 @@
 
 ## Développement local
 
+15/08/2026 14:30 — documentation — The target architecture reference is now fully written in English and has been checked for sensitive information.
 15/08/2026 14:25 — build local — Le contrôle de relance identifie désormais directement le chemin de l’exécutable lancé, sans faux échec « chemin inconnu ».
 15/08/2026 14:15 — développement local — Dans « Dernière session Windows », chaque niveau est trié par temps d’utilisation décroissant ; un ordre manuel enregistré reste prioritaire pour les catégories concernées.
 15/08/2026 13:55 — développement local — Audit avant publication : secrets et dépendances contrôlés, fichiers d’exploitation privés retirés de Git, journaux désactivés par défaut, APIs limitées au loopback, origine du pont navigateur vérifiée, jetons d’URL supprimés et HTML dynamique échappé.
