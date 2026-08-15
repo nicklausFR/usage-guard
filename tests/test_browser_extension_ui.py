@@ -13,6 +13,16 @@ class BrowserExtensionUiTest(unittest.TestCase):
         self.assertIn('"pointer-events:auto"', script)
         self.assertIn('ui.overlay.style.display = blocked ? "block" : "none"', script)
 
+    def test_limit_banner_keeps_progress_on_the_main_row(self):
+        script = (
+            Path(__file__).parents[1] / "browser_extension" / "content.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('ui.banner.style.display = "flex"', script)
+        self.assertIn('"flex:1 1 160px;min-width:60px;height:5px', script)
+        self.assertIn("banner.append(label, progress, countdown, bonus)", script)
+        self.assertNotIn("clear:both", script)
+
 
 if __name__ == "__main__":
     unittest.main()

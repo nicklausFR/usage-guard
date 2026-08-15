@@ -1,5 +1,7 @@
 # Journal des versions
 
+15/08/2026 15:50 — développement local — Le bandeau de limite de l’extension navigateur tient désormais sur une seule ligne compacte, avec la barre de progression entre le libellé et le temps restant.
+
 ## Développement local
 
 15/08/2026 15:35 — développement local — Une limite quotidienne créée après le début de lâ€™utilisation reprend désormais le total journalier exact déjà mesuré, y compris pour les catégories ; le compteur et la rallonge repartent à zéro chaque jour et une réinitialisation explicite conserve un compteur nul.

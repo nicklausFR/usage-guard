@@ -92,18 +92,19 @@ function ensureLimitUi() {
   banner.id = "usage-guard-limit-banner";
   banner.style.cssText = [
     "display:none", "position:fixed", "z-index:2147483647", "top:0", "left:0", "right:0",
-    "box-sizing:border-box", "min-height:48px", "padding:11px 14px 9px",
+    "box-sizing:border-box", "min-height:40px", "padding:8px 14px",
+    "align-items:center", "gap:10px", "white-space:nowrap",
     "background:rgba(100,18,24,.62)", "color:white", "font:600 14px system-ui,sans-serif",
     "box-shadow:0 2px 8px #0005", "pointer-events:none", "user-select:none"
   ].join(";");
-  label.style.cssText = "vertical-align:middle";
-  countdown.style.cssText = "float:right;margin-left:14px;font-variant-numeric:tabular-nums";
+  label.style.cssText = "flex:0 1 auto;overflow:hidden;text-overflow:ellipsis";
+  countdown.style.cssText = "flex:0 0 auto;font-variant-numeric:tabular-nums";
   bonus.style.cssText = [
-    "display:none", "float:right", "margin:-4px 0 0 14px", "padding:5px 10px",
+    "display:none", "flex:0 0 auto", "padding:5px 10px",
     "border:1px solid #ffb3b3", "border-radius:5px", "background:#68181e",
     "color:white", "font:600 12px system-ui,sans-serif", "cursor:pointer", "pointer-events:auto"
   ].join(";");
-  progress.style.cssText = "clear:both;height:5px;margin-top:9px;overflow:hidden;border-radius:99px;background:#65191e";
+  progress.style.cssText = "flex:1 1 160px;min-width:60px;height:5px;overflow:hidden;border-radius:99px;background:#65191e";
   fill.style.cssText = "height:100%;width:0;background:#ff6b6b;transition:width .35s linear";
   overlay.style.cssText = [
     "display:none", "position:fixed", "z-index:2147483646", "top:48px", "right:0",
@@ -111,7 +112,7 @@ function ensureLimitUi() {
     "cursor:not-allowed"
   ].join(";");
   progress.append(fill);
-  banner.append(label, bonus, countdown, progress);
+  banner.append(label, progress, countdown, bonus);
   (document.documentElement || document).append(overlay, banner);
   bonus.addEventListener("click", async () => {
     if (!limitUi?.state) return;
@@ -140,7 +141,7 @@ function renderLimit(state) {
   const remaining = Math.max(0, Number(state.remaining) || 0);
   const blocked = remaining <= 0;
   setMediaBlocked(blocked);
-  ui.banner.style.display = "block";
+  ui.banner.style.display = "flex";
   ui.label.textContent = blocked ? `${state.label} — ${tr("timeElapsed")}` : state.label;
   ui.countdown.textContent = formatDuration(remaining);
   ui.fill.style.width = `${Math.min(100, 100 * (Number(state.seconds) || 0) / allowed)}%`;
