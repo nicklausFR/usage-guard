@@ -2,6 +2,8 @@
 
 ## Développement local
 
+15/08/2026 15:35 — développement local — Une limite quotidienne créée après le début de lâ€™utilisation reprend désormais le total journalier exact déjà mesuré, y compris pour les catégories ; le compteur et la rallonge repartent à zéro chaque jour et une réinitialisation explicite conserve un compteur nul.
+
 15/08/2026 15:25 — migration locale — Les totaux journaliers antérieurs à lâ€™enregistrement des sessions sont convertis en sessions historiques estimées par journée et par activité ; les durées restent exactes et les horaires sont explicitement marqués comme reconstruits.
 
 15/08/2026 15:20 — développement local — Les frises masquent les programmes seulement ouverts mais jamais utilisés, afin de refléter les activités réelles sans supprimer les données brutes.
@@ -120,3 +122,4 @@
 15/08/2026 12:01 — v1.043 — Préavis multiples et globaux corrigés, unités de durée, catégories réorganisables, systray simplifié, boutons ON/OFF pour toutes les limites et déploiement fiabilisé.
 15/08/2026 12:46 — v1.044 — Seuils par durée ou horaire, cibles hiérarchiques, validité datée, échéances expirées supprimées et préavis multiples regroupés.
 15/08/2026 14:36 — v1.045 — Tri décroissant des activités et paramètres distants réservés aux administrateurs.
+15/08/2026 15:27 — v1.046 — Frises centrées sur les activités réelles et reconstruction des sessions historiques à partir des totaux journaliers.

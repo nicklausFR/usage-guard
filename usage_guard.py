@@ -1429,13 +1429,15 @@ class AppUsageStore:
                 migrated.append(target_key)
             rolling[target_key] = state
         state = rolling[target_key]
-        cutoff = moment - timedelta(hours=24)
+        cutoff = datetime.combine(moment.date(), datetime.min.time()).replace(
+            tzinfo=moment.tzinfo
+        )
         buckets = state.setdefault("buckets", {})
-        expired = [stamp for stamp in buckets if datetime.fromisoformat(stamp) <= cutoff]
+        expired = [stamp for stamp in buckets if datetime.fromisoformat(stamp) < cutoff]
         for stamp in expired:
             buckets.pop(stamp, None)
         granted = state.get("extension_granted_at")
-        extension_used = bool(granted and datetime.fromisoformat(granted) > cutoff)
+        extension_used = bool(granted and datetime.fromisoformat(granted) >= cutoff)
         if granted and not extension_used:
             state["extension_granted_at"] = None
         if expired or (granted and not extension_used):
@@ -1548,7 +1550,12 @@ class AppUsageStore:
         self.save(force=True)
 
     def reset_app_limit_state(self, target_key, when=None):
-        self.data.setdefault("app_limit_rolling", {})[target_key] = {"buckets": {}, "extension_granted_at": None}
+        moment = self._limit_moment(when)
+        self.data.setdefault("app_limit_rolling", {})[target_key] = {
+            "buckets": {}, "extension_granted_at": None,
+            "usage_seeded_at": moment.isoformat(timespec="seconds"),
+            "usage_seed_version": 4,
+        }
         migrated = self.data.setdefault("app_limit_rolling_migrated", [])
         if target_key not in migrated:
             migrated.append(target_key)
@@ -1556,8 +1563,48 @@ class AppUsageStore:
         self.save(force=True)
 
     def prepare_app_limit(self, target_key, limit_seconds, extension_seconds, when=None):
-        """Initialize the rolling 24-hour state without erasing measured usage."""
-        self._rolling_limit_state(target_key, when)
+        """Initialize a limit from activity already measured in its rolling window."""
+        state, moment, _ = self._rolling_limit_state(target_key, when)
+        if int(state.get("usage_seed_version", 0)) >= 4:
+            return
+        seed_start = datetime.combine(moment.date(), datetime.min.time()).replace(
+            tzinfo=moment.tzinfo
+        )
+        measured = self._daily_usage_for_limit(target_key, moment.date())
+        state["buckets"] = (
+            {seed_start.isoformat(timespec="minutes"): measured}
+            if measured > 0 else {}
+        )
+        state["usage_seeded_at"] = moment.isoformat(timespec="seconds")
+        state["usage_seed_version"] = 4
+        self._dirty = True
+        self.save(force=True)
+
+    def _daily_usage_for_limit(self, target_key, day):
+        """Return the authoritative active total for one target or category."""
+        return round(sum(
+            float(seconds or 0)
+            for activity_key, seconds in self.data.get("days", {}).get(
+                day.isoformat(), {}
+            ).items()
+            if self._activity_matches_limit(str(activity_key), target_key)
+        ), 3)
+
+    def _activity_matches_limit(self, activity_key, target_key):
+        if activity_key == target_key:
+            return True
+        if not str(target_key).startswith("category:"):
+            return False
+        wanted = str(target_key).removeprefix("category:")
+        metadata = self.data.get("targets", {}).get(activity_key, {})
+        categories = {
+            str(metadata.get("category", "") or "").strip(),
+            str(metadata.get("site_category", "") or "").strip(),
+        }
+        return any(
+            wanted in self.category_lineage(category)
+            for category in categories if category
+        )
 
     def add_app_limit_seconds(self, target_key, seconds, when=None):
         if seconds <= 0:

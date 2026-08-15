@@ -429,7 +429,7 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertNotIn("__root__", store.categories())
             self.assertIn("Travail", store.categories())
 
-    def test_limit_usage_is_a_rolling_24_hour_window(self):
+    def test_limit_usage_resets_at_local_midnight(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")
             first = datetime.fromisoformat("2026-08-12T10:00:00+02:00")
@@ -439,8 +439,70 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             store.add_app_limit_seconds("app:test", 10, first)
             store.add_app_limit_seconds("app:test", 5, recent)
 
-            self.assertEqual(store.app_limit_state_for_day("app:test", recent)["seconds"], 15)
+            self.assertEqual(store.app_limit_state_for_day("app:test", recent)["seconds"], 5)
             self.assertEqual(store.app_limit_state_for_day("app:test", after_window)["seconds"], 5)
+
+    def test_new_limit_includes_usage_measured_before_its_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["days"] = {"2026-08-15": {"app:editor": 7200.0}}
+            now = datetime.fromisoformat("2026-08-15T12:00:00+02:00")
+
+            store.prepare_app_limit("app:editor", 14400, 900, now)
+
+            self.assertEqual(
+                store.app_limit_state_for_day("app:editor", now)["seconds"], 7200
+            )
+
+    def test_new_category_limit_includes_child_activity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["targets"]["app:chatgpt"] = {"category": "Programmation"}
+            store.data["category_parents"]["Programmation"] = "Travail"
+            store.data["days"] = {"2026-08-15": {"app:chatgpt": 5400.0}}
+            now = datetime.fromisoformat("2026-08-15T12:00:00+02:00")
+
+            store.prepare_app_limit("category:Travail", 14400, 900, now)
+
+            self.assertEqual(
+                store.app_limit_state_for_day("category:Travail", now)["seconds"],
+                5400,
+            )
+
+    def test_reset_limit_does_not_restore_prior_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["days"] = {"2026-08-15": {"app:editor": 7200.0}}
+            now = datetime.fromisoformat("2026-08-15T12:00:00+02:00")
+
+            store.reset_app_limit_state("app:editor", now)
+            store.prepare_app_limit("app:editor", 14400, 900, now)
+
+            self.assertEqual(
+                store.app_limit_state_for_day("app:editor", now)["seconds"], 0
+            )
+
+    def test_limit_seed_replaces_inaccurate_legacy_buckets_with_daily_total(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["days"] = {"2026-08-15": {"app:editor": 5400.0}}
+            store.data["app_limit_rolling"]["app:editor"] = {
+                "buckets": {"2026-08-15T09:00+02:00": 9999.0},
+                "extension_granted_at": None,
+                "usage_seeded_at": "2026-08-15T11:00:00+02:00",
+            }
+            now = datetime.fromisoformat("2026-08-15T12:00:00+02:00")
+
+            store.prepare_app_limit("app:editor", 14400, 900, now)
+
+            self.assertEqual(
+                store.app_limit_state_for_day("app:editor", now)["seconds"],
+                5400,
+            )
+            self.assertEqual(
+                store.data["app_limit_rolling"]["app:editor"]["usage_seed_version"],
+                4,
+            )
 
     def test_limited_target_remains_visible_at_zero_seconds(self):
         with tempfile.TemporaryDirectory() as directory:
