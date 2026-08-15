@@ -862,6 +862,50 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
 
             self.assertEqual(store.windows_sessions()[1]["ended_at"], last_active)
 
+    def test_daily_totals_before_timeline_are_synthesized_as_estimated_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            data = AppUsageStore._empty_data()
+            data["days"] = {"2026-08-03": {"app:editor": 3600.0}}
+            data["passive_days"] = {"2026-08-03": {"Radio": 900.0}}
+            data["targets"] = {"app:editor": {"label": "Editor"}}
+            data["sessions"] = [{
+                "id": "active:new", "kind": "active", "key": "app:new",
+                "label": "New", "started_at": "2026-08-13T09:00:00+02:00",
+                "ended_at": "2026-08-13T09:01:00+02:00",
+            }]
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+            store = AppUsageStore(path)
+
+            legacy_windows = [
+                item for item in store.windows_sessions() if item.get("estimated")
+            ]
+            legacy_activity = [
+                item for item in store.data["sessions"]
+                if item.get("source") == "legacy-daily-total"
+            ]
+            self.assertEqual(len(legacy_windows), 1)
+            self.assertEqual(legacy_windows[0]["started_at"][:10], "2026-08-03")
+            self.assertEqual(
+                {(item["kind"], item["label"]) for item in legacy_activity},
+                {("program", "Editor"), ("active", "Editor"), ("multimedia", "Radio")},
+            )
+            self.assertTrue(all(item["estimated"] for item in legacy_activity))
+
+            reloaded = AppUsageStore(path)
+            self.assertEqual(
+                len([item for item in reloaded.windows_sessions() if item.get("estimated")]),
+                1,
+            )
+            self.assertEqual(
+                len([
+                    item for item in reloaded.data["sessions"]
+                    if item.get("source") == "legacy-daily-total"
+                ]),
+                3,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

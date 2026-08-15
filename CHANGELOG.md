@@ -2,6 +2,10 @@
 
 ## Développement local
 
+15/08/2026 15:25 — migration locale — Les totaux journaliers antérieurs à lâ€™enregistrement des sessions sont convertis en sessions historiques estimées par journée et par activité ; les durées restent exactes et les horaires sont explicitement marqués comme reconstruits.
+
+15/08/2026 15:20 — développement local — Les frises masquent les programmes seulement ouverts mais jamais utilisés, afin de refléter les activités réelles sans supprimer les données brutes.
+
 15/08/2026 14:55 — développement local — Quitter Usage Guard ferme également sa fenêtre PWA locale dédiée, sans fermer un éventuel onglet normal du navigateur.
 
 15/08/2026 14:50 — développement local — La frise résout désormais les fenêtres Chrome installées comme PWA avec leur titre et leur libellé personnalisé, en fusionnant leurs périodes ouvertes et actives dans une seule ligne.

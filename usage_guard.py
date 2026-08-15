@@ -244,7 +244,8 @@ class AppUsageStore:
         self.data = self._load()
         self.data, encoding_repaired = _repair_mojibake_data(self.data)
         legacy_migrated = self._migrate_legacy_targets()
-        self._dirty = encoding_repaired or legacy_migrated
+        legacy_sessions_migrated = self._synthesize_legacy_daily_sessions()
+        self._dirty = encoding_repaired or legacy_migrated or legacy_sessions_migrated
         if encoding_repaired:
             backup = self.path.with_suffix(".encoding-backup.json")
             try:
@@ -252,6 +253,7 @@ class AppUsageStore:
                     shutil.copy2(self.path, backup)
             except OSError:
                 pass
+        if self._dirty:
             self.save(force=True)
 
     def _backup_activity_file(self):
@@ -448,6 +450,82 @@ class AppUsageStore:
 
     def windows_sessions(self):
         return [dict(item) for item in self.data.get("windows_sessions", []) if item.get("started_at")]
+
+    def _synthesize_legacy_daily_sessions(self):
+        """Make pre-timeline daily totals selectable without inventing exact hours."""
+        real_starts = [
+            str(item.get("started_at", ""))
+            for item in self.data.get("sessions", [])
+            if item.get("started_at") and not item.get("estimated")
+        ]
+        real_starts.extend(
+            str(item.get("started_at", ""))
+            for item in self.data.get("windows_sessions", [])
+            if item.get("started_at") and not item.get("estimated")
+        )
+        first_real_day = min((value[:10] for value in real_starts), default=date.today().isoformat())
+        existing_days = {
+            str(item.get("started_at", ""))[:10]
+            for item in self.data.get("windows_sessions", [])
+            if item.get("started_at")
+        }
+        changed = False
+        for day in sorted(self.data.get("days", {})):
+            if day >= first_real_day or day in existing_days:
+                continue
+            try:
+                day_start = datetime.combine(
+                    date.fromisoformat(day), datetime.min.time()
+                ).astimezone()
+            except ValueError:
+                continue
+            day_end = day_start + timedelta(days=1) - timedelta(seconds=1)
+            self.data.setdefault("windows_sessions", []).append({
+                "started_at": day_start.isoformat(timespec="seconds"),
+                "ended_at": day_end.isoformat(timespec="seconds"),
+                "last_observed_at": day_end.isoformat(timespec="seconds"),
+                "estimated": True,
+                "source": "legacy-daily-total",
+            })
+            for target_key, raw_seconds in self.data.get("days", {}).get(day, {}).items():
+                seconds = min(86399.0, max(0.0, float(raw_seconds or 0)))
+                if not seconds:
+                    continue
+                metadata = self.data.get("targets", {}).get(target_key, {})
+                label = str(metadata.get("label") or _legacy_label(target_key))
+                end = day_start + timedelta(seconds=seconds)
+                kind = "web" if str(target_key).startswith("site:") else "program"
+                common = {
+                    "key": str(target_key), "label": label,
+                    "started_at": day_start.isoformat(timespec="seconds"),
+                    "ended_at": end.isoformat(timespec="seconds"),
+                    "estimated": True, "source": "legacy-daily-total",
+                }
+                self.data.setdefault("sessions", []).extend((
+                    {**common, "id": f"legacy:{day}:{target_key}", "kind": kind},
+                    {**common, "id": f"active:legacy:{day}:{target_key}", "kind": "active"},
+                ))
+            for media_name, raw_seconds in self.data.get("passive_days", {}).get(day, {}).items():
+                seconds = min(86399.0, max(0.0, float(raw_seconds or 0)))
+                if not seconds:
+                    continue
+                self.data.setdefault("sessions", []).append({
+                    "id": f"multimedia:legacy:{day}:{media_name}",
+                    "kind": "multimedia", "key": f"passive:{media_name}",
+                    "label": str(media_name),
+                    "started_at": day_start.isoformat(timespec="seconds"),
+                    "ended_at": (day_start + timedelta(seconds=seconds)).isoformat(timespec="seconds"),
+                    "estimated": True, "source": "legacy-daily-total",
+                })
+            changed = True
+        if changed:
+            self.data["windows_sessions"].sort(
+                key=lambda item: str(item.get("started_at", "")), reverse=True
+            )
+            self.data["sessions"].sort(
+                key=lambda item: str(item.get("started_at", ""))
+            )
+        return changed
 
     def notification_rules(self):
         """Return only notifications explicitly configured by the user."""

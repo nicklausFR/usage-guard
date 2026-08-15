@@ -77,6 +77,9 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn("Ouvert, non actif", script)
         self.assertIn("Usage actif comptabilisé", script)
         self.assertIn('item.kind==="active"', script)
+        self.assertIn(
+            ".filter(group=>activeKeys.has(group.item.key))", script
+        )
 
     def test_settings_tab_exposes_language_choice(self):
         root = Path(__file__).parents[1] / "pwa"

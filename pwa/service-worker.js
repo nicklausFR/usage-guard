@@ -1,4 +1,4 @@
-const CACHE=`usage-guard-shell-v1-045r5:${self.location.port}`;
+const CACHE=`usage-guard-shell-v1-045r6:${self.location.port}`;
 const SHELL=["./","index.html","style.css?v=1.045","i18n.js?v=1.045","app.js?v=1.045","manifest.json","usage-guard.ico","usage-guard-192.png","usage-guard-512.png"];
 self.addEventListener("install",event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting())));
 self.addEventListener("activate",event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim()).then(()=>self.clients.matchAll({type:"window"})).then(clients=>Promise.all(clients.map(client=>client.navigate(client.url))))));
