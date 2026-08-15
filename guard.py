@@ -152,20 +152,9 @@ class MonitoringService(QObject):
             running_apps = self.probe.running_applications()
             if running_apps is not None:
                 already_running = not self._program_inventory_initialized
-                self._program_sessions = {}
-                for executable, details in running_apps.items():
-                    program_target = self.usage.target_for_context(ActiveContext(
-                        app_name=details["executable"]
-                    ))
-                    if not program_target or self.usage.is_excluded(program_target.key):
-                        continue
-                    self.usage.remember_target(program_target)
-                    self._program_sessions[f"program:{executable}"] = {
-                        "kind": "program", "key": program_target.key,
-                        "label": program_target.label,
-                        "started_before_tracking": already_running,
-                        "source": "windows",
-                    }
+                self._program_sessions = self._resolved_program_sessions(
+                    running_apps, already_running
+                )
                 self._program_inventory_initialized = True
             self._last_program_inventory = now
 
@@ -572,6 +561,42 @@ class MonitoringService(QObject):
             browser = key.split(":", 2)[1]
             return f"site:{browser}:{detail_host}", detail_host
         return key, str(getattr(target, "label", "") or key)
+
+    def _resolved_program_sessions(self, running_apps, already_running=False):
+        """Resolve installed browser apps from their visible window titles."""
+        sessions = {}
+        for executable, details in dict(running_apps or {}).items():
+            resolved = {}
+            for title in details.get("window_titles") or [""]:
+                target = self.usage.target_for_context(ActiveContext(
+                    app_name=details["executable"], window_title=str(title)
+                ))
+                if not target or self.usage.is_excluded(target.key):
+                    continue
+                self.usage.remember_target(target)
+                session_key, session_label = self._session_identity(target)
+                resolved[session_key] = (target, session_label)
+
+            multiple_targets = len(resolved) > 1
+            for session_key, (target, session_label) in resolved.items():
+                row_id = (
+                    f"program:{executable}:{session_key}"
+                    if multiple_targets else f"program:{executable}"
+                )
+                if not multiple_targets:
+                    self.usage.reassign_program_sessions(
+                        row_id,
+                        target.key,
+                        session_label,
+                        since=getattr(self, "_tracking_started_at", None),
+                    )
+                sessions[row_id] = {
+                    "kind": "program", "key": target.key,
+                    "label": session_label,
+                    "started_before_tracking": already_running,
+                    "source": "windows",
+                }
+        return sessions
 
     @staticmethod
     def _is_multimedia_target(target_key):

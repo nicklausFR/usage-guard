@@ -1166,13 +1166,14 @@ class AppUsageStore:
         while key in merged_targets and key not in seen:
             seen.add(key)
             key = merged_targets[key]
-        if key == target.key:
-            return target
         metadata = self.data["targets"].get(key, {})
         return UsageTarget(
             key=key,
-            label=metadata.get("label", _legacy_label(key)),
+            label=metadata.get(
+                "label", target.label if key == target.key else _legacy_label(key)
+            ),
             category=metadata.get("category", target.category),
+            detail_host=target.detail_host if key == target.key else "",
         )
 
     def add_seconds(self, target, seconds, when=None):
@@ -1274,6 +1275,12 @@ class AppUsageStore:
             changed = True
         for key, details in observed.items():
             if key in open_sessions:
+                session = open_sessions[key]
+                for field in ("key", "label", "source"):
+                    value = str(details.get(field, session.get(field, "")))
+                    if value and session.get(field) != value:
+                        session[field] = value
+                        changed = True
                 continue
             open_sessions[key] = {
                 "id": key, "kind": str(details.get("kind", "program")),
@@ -1282,6 +1289,24 @@ class AppUsageStore:
                 "started_before_tracking": bool(details.get("started_before_tracking", False)),
                 "source": str(details.get("source", "monitor")),
             }
+            changed = True
+        if changed:
+            self._dirty = True
+
+    def reassign_program_sessions(self, session_id, target_key, label, since=None):
+        """Fuse a technical browser row into its resolved installed application."""
+        changed = False
+        candidates = list(self.data.setdefault("sessions", []))
+        candidates.extend(self.data.setdefault("open_sessions", {}).values())
+        for session in candidates:
+            if session.get("id") != session_id or session.get("kind") != "program":
+                continue
+            if since and str(session.get("started_at", "")) < str(since):
+                continue
+            if session.get("key") == target_key and session.get("label") == label:
+                continue
+            session["key"] = target_key
+            session["label"] = label
             changed = True
         if changed:
             self._dirty = True

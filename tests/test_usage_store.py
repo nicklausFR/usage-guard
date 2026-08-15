@@ -27,6 +27,18 @@ class AppUsageStoreBackupTest(unittest.TestCase):
 
 
 class AppUsageStoreSessionsTest(unittest.TestCase):
+    def test_renamed_target_label_is_used_for_new_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.rename_target("app:chatgpt", "Assistant")
+
+            target = store.target_for_context(ActiveContext(
+                app_name="chrome.exe", window_title="ChatGPT"
+            ))
+
+            self.assertEqual(target.key, "app:chatgpt")
+            self.assertEqual(target.label, "Assistant")
+
     def test_deleted_potplayer_limit_is_never_recreated_on_startup(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")

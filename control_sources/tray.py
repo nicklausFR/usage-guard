@@ -37,7 +37,16 @@ class TrayControlSource:
         return self.tray_icon
 
     def stop(self):
+        self.close_panel()
         self.service.stop()
+
+    def close_panel(self):
+        """Close the dedicated local PWA window without touching browser tabs."""
+        window = self._pwa_window()
+        if window:
+            debug_log(f"closing local PWA on Usage Guard shutdown hwnd={window}")
+            ctypes.windll.user32.PostMessageW(window, 0x0010, 0, 0)
+        self._pwa_launching_until = 0.0
 
     def toggle_panel(self):
         port = int(getattr(config, "REMOTE_API_PORT", 8766))
@@ -46,8 +55,7 @@ class TrayControlSource:
         window = self._pwa_window()
         if window:
             debug_log(f"closing PWA window hwnd={window}")
-            ctypes.windll.user32.PostMessageW(window, 0x0010, 0, 0)
-            self._pwa_launching_until = 0.0
+            self.close_panel()
             return
         if time.monotonic() < self._pwa_launching_until:
             debug_log("PWA launch already in progress")

@@ -294,7 +294,7 @@ class WindowsActivityProbe:
         return ActiveContext(is_afk=True)
 
     def running_applications(self):
-        """Return one entry per executable owning a visible titled window."""
+        """Return visible applications and every title needed to resolve PWAs."""
         if platform.system() != "Windows":
             return {}
         try:
@@ -338,10 +338,17 @@ class WindowsActivityProbe:
                     if executable.casefold() == "usage-guard.exe" or executable.casefold() in ignored_hosts:
                         return True
                     key = executable.casefold()
-                    applications.setdefault(
+                    application = applications.setdefault(
                         key,
-                        {"executable": executable, "label": Path(executable).stem},
+                        {
+                            "executable": executable,
+                            "label": Path(executable).stem,
+                            "window_titles": [],
+                        },
                     )
+                    title = title_buffer.value.strip()
+                    if title and title not in application["window_titles"]:
+                        application["window_titles"].append(title)
                 finally:
                     kernel32.CloseHandle(handle)
                 return True

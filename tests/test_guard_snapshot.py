@@ -382,6 +382,31 @@ class MonitoringServiceSnapshotTest(unittest.TestCase):
                 snapshot["current"]["target_key"], "site:brave.exe:other-sites"
             )
 
+    def test_chrome_pwa_inventory_fuses_program_and_active_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.update_sessions({"program:chrome.exe": {
+                "kind": "program", "key": "app:chrome", "label": "chrome",
+                "source": "windows",
+            }}, at="2026-08-15T06:05:43+02:00")
+
+            service = MonitoringService.__new__(MonitoringService)
+            service.usage = store
+            service._tracking_started_at = "2026-08-15T06:00:00+02:00"
+            observed = service._resolved_program_sessions({
+                "chrome.exe": {
+                    "executable": "chrome.exe",
+                    "window_titles": ["ChatGPT"],
+                }
+            })
+            store.update_sessions(observed, at="2026-08-15T15:10:00+02:00")
+
+            session = store.data["open_sessions"]["program:chrome.exe"]
+            self.assertEqual(session["key"], "app:chatgpt")
+            self.assertEqual(session["label"], "ChatGPT")
+            self.assertEqual(session["started_at"], "2026-08-15T06:05:43+02:00")
+
+
 
 if __name__ == "__main__":
     unittest.main()
