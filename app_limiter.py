@@ -307,11 +307,11 @@ class AppLimiter(QObject):
         starts_at = datetime.fromisoformat(str(status["started_at"]))
         return max(0, (starts_at - now).total_seconds()) <= warning_seconds
 
-    def refresh_computer_block(self):
+    def refresh_computer_block(self, now=None):
         block = self.usage.data.get("computer_block", {})
+        now = now or datetime.now().astimezone()
         if block.get("valid_until"):
             try:
-                now = datetime.now().astimezone()
                 expires_at = datetime.combine(
                     date.fromisoformat(str(block["valid_until"])),
                     datetime.strptime(str(block.get("valid_until_time") or "23:59"), "%H:%M").time(),
@@ -323,14 +323,14 @@ class AppLimiter(QObject):
                     return self.computer_block_status(now)
             except (TypeError, ValueError):
                 pass
-        status = self.computer_block_status()
+        status = self.computer_block_status(now)
         if status["active"]:
             self.computer_overlay.show_block(status["ends_at"])
         else:
             self.computer_overlay.hide()
             if status.get("pending"):
                 starts_at = datetime.fromisoformat(status["started_at"])
-                remaining = max(0, (starts_at - datetime.now().astimezone()).total_seconds())
+                remaining = max(0, (starts_at - now).total_seconds())
                 for rule_id, warning_seconds in self._warning_rules("computer:all"):
                     token = (str(status["started_at"]), rule_id)
                     if remaining > warning_seconds or token in self._computer_block_warning_shown:
@@ -342,9 +342,18 @@ class AppLimiter(QObject):
                         f"La limitation de l’ordinateur commencera dans {self._format_duration(remaining)} et durera jusqu’au {datetime.fromisoformat(status['ends_at']).astimezone().strftime('%d/%m/%Y à %H:%M')}.",
                         0,
                     )
-            if status.get("enabled") and not status.get("pending") and self.usage.data.get("computer_block"):
-                self.usage.clear_computer_block()
-                self._computer_block_warning_shown.clear()
+            if (
+                status.get("enabled")
+                and block.get("mode") != "schedule"
+                and self.usage.data.get("computer_block")
+            ):
+                try:
+                    expired = now >= datetime.fromisoformat(str(block["ends_at"]))
+                except (KeyError, TypeError, ValueError):
+                    expired = False
+                if expired:
+                    self.usage.clear_computer_block()
+                    self._computer_block_warning_shown.clear()
         return status
 
     def clear_computer_block(self):

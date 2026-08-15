@@ -66,6 +66,35 @@ class DurationFormattingTest(unittest.TestCase):
         self.assertFalse(after["active"])
         self.assertFalse(after["pending"])
 
+    def test_recurring_computer_block_is_kept_until_final_validity_end(self):
+        block = {
+            "enabled": True, "mode": "schedule",
+            "daily_start": "18:00", "daily_end": "20:00",
+            "valid_from": "2026-08-15", "valid_from_time": "18:00",
+            "valid_until": "2026-08-15", "valid_until_time": "21:00",
+        }
+        usage = SimpleNamespace(data={"computer_block": block})
+        usage.clear_computer_block = lambda: usage.data.update(computer_block={})
+        limiter = AppLimiter.__new__(AppLimiter)
+        limiter.usage = usage
+        limiter.computer_overlay = SimpleNamespace(
+            show_block=lambda _ends_at: None, hide=lambda: None,
+        )
+        limiter._computer_block_warning_shown = set()
+
+        status = limiter.refresh_computer_block(
+            datetime.fromisoformat("2026-08-15T20:30:00+02:00")
+        )
+
+        self.assertFalse(status["active"])
+        self.assertFalse(status["pending"])
+        self.assertEqual(usage.data["computer_block"], block)
+
+        limiter.refresh_computer_block(
+            datetime.fromisoformat("2026-08-15T21:00:00+02:00")
+        )
+        self.assertEqual(usage.data["computer_block"], {})
+
     def test_multiple_warning_rules_are_kept_for_the_same_target(self):
         limiter = AppLimiter.__new__(AppLimiter)
         limiter.usage = SimpleNamespace(data={"notification_rules": [

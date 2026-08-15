@@ -2,6 +2,7 @@
 
 ## Développement local
 
+15/08/2026 14:45 — développement local — Une limitation planifiée de tout l’ordinateur reste enregistrée jusqu’à sa date et son heure de fin réelles, même lorsque sa dernière plage horaire est déjà terminée.
 15/08/2026 14:40 — développement local — Le bandeau de limite de l’extension navigateur devient translucide et laisse passer les clics vers la page, tout en conservant le bouton de rallonge et l’overlay de blocage final.
 15/08/2026 14:35 — développement local — Dans la PWA distante, l’onglet Paramètres reste visible mais ne montre aucun contenu aux comptes non administrateurs ; les administrateurs n’y voient que la gestion des utilisateurs.
 15/08/2026 14:30 — documentation — The target architecture reference is now fully written in English and has been checked for sensitive information.

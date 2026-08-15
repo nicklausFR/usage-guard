@@ -357,5 +357,5 @@ $("#create-user").onclick=()=>openDialog("Créer un utilisateur",'<label>Identif
 if(new URLSearchParams(location.search).has("token"))history.replaceState({},"",location.pathname);
 const renderOverviewInSelectedLanguage=renderOverview;
 renderOverview=function(data,options){if(data?.settings?.language)window.UG_I18N?.setLanguage(data.settings.language);return renderOverviewInSelectedLanguage(data,options)};
-if("serviceWorker" in navigator){let reloading=false;navigator.serviceWorker.addEventListener("controllerchange",()=>{if(reloading)return;reloading=true;location.reload()});navigator.serviceWorker.register("service-worker.js?v=1.044",{updateViaCache:"none"}).then(registration=>registration.update())}
+if("serviceWorker" in navigator){let reloading=false;navigator.serviceWorker.addEventListener("controllerchange",()=>{if(reloading)return;reloading=true;location.reload()});navigator.serviceWorker.register("service-worker.js?v=1.045",{updateViaCache:"none"}).then(registration=>registration.update())}
 checkSession().then(ready=>{if(ready)load()});setInterval(()=>{if(!appReady)return;if($("#today").classList.contains("active"))load("scope=session",{live:true});else if($("#analysis").classList.contains("active"))refreshAnalysisActivity()},1000);
