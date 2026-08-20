@@ -60,8 +60,63 @@ NOTIFICATION_ACTIONS = {
 }
 
 
+class DocumentConflict(ValueError):
+    pass
+
+
 def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def json_hash(value):
+    raw = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def apply_json_delta(base, delta):
+    if not isinstance(delta, dict):
+        raise ValueError("Delta JSON invalide")
+    kind = delta.get("kind")
+
+    if kind == "value":
+        return delta.get("value")
+
+    if kind == "dict":
+        if not isinstance(base, dict):
+            raise ValueError("Delta dictionnaire incompatible")
+        result = dict(base)
+        remove = delta.get("remove", [])
+        set_values = delta.get("set", {})
+        patch = delta.get("patch", {})
+        if not isinstance(remove, list) or not isinstance(set_values, dict) or not isinstance(patch, dict):
+            raise ValueError("Delta dictionnaire invalide")
+        for key in remove:
+            result.pop(str(key), None)
+        result.update(set_values)
+        for key, child in patch.items():
+            if key not in result:
+                raise ValueError("Delta dictionnaire sans base")
+            result[key] = apply_json_delta(result[key], child)
+        return result
+
+    if kind == "list":
+        if not isinstance(base, list):
+            raise ValueError("Delta liste incompatible")
+        start, stop, items = delta.get("start"), delta.get("stop"), delta.get("items")
+        if (
+            not isinstance(start, int)
+            or not isinstance(stop, int)
+            or not isinstance(items, list)
+            or start < 0
+            or stop < start
+            or stop > len(base)
+        ):
+            raise ValueError("Delta liste invalide")
+        return base[:start] + items + base[stop:]
+
+    raise ValueError("Type de delta JSON inconnu")
 
 
 def password_digest(password, salt):
@@ -172,31 +227,54 @@ class Store:
         finally:
             db.close()
 
-    def save_snapshot(self, device_id, snapshot):
-        payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    def _save_document(self, table, device_id, document):
+        payload = json.dumps(document, ensure_ascii=False, separators=(",", ":"))
         with self._lock, self.connect() as db:
             db.execute(
-                "INSERT INTO snapshots VALUES(?,?,?) ON CONFLICT(device_id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
+                f"INSERT INTO {table} VALUES(?,?,?) ON CONFLICT(device_id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
                 (device_id, payload, utc_now()),
             )
+
+    def _load_document(self, table, device_id):
+        with self.connect() as db:
+            row = db.execute(
+                f"SELECT payload,updated_at FROM {table} WHERE device_id=?",
+                (device_id,),
+            ).fetchone()
+        if not row:
+            return None, None
+        return json.loads(row["payload"]), row["updated_at"]
+
+    def _patch_document(self, table, device_id, delta, base_hash, target_hash):
+        current, _ = self._load_document(table, device_id)
+        if current is None:
+            raise DocumentConflict("Document de base absent")
+        if json_hash(current) != str(base_hash or ""):
+            raise DocumentConflict("Document distant modifié")
+        updated = apply_json_delta(current, delta)
+        if json_hash(updated) != str(target_hash or ""):
+            raise ValueError("Hash cible incohérent")
+        self._save_document(table, device_id, updated)
+
+    def save_snapshot(self, device_id, snapshot):
+        self._save_document("snapshots", device_id, snapshot)
+
+    def patch_snapshot(self, device_id, delta, base_hash, target_hash):
+        self._patch_document("snapshots", device_id, delta, base_hash, target_hash)
 
     def snapshot(self, device_id):
-        with self.connect() as db:
-            row = db.execute("SELECT payload,updated_at FROM snapshots WHERE device_id=?", (device_id,)).fetchone()
-        return ({**json.loads(row["payload"]), "backend_updated_at": row["updated_at"]} if row else None)
+        payload, updated_at = self._load_document("snapshots", device_id)
+        return ({**payload, "backend_updated_at": updated_at} if payload else None)
 
     def save_activity_store(self, device_id, activity):
-        payload = json.dumps(activity, ensure_ascii=False, separators=(",", ":"))
-        with self._lock, self.connect() as db:
-            db.execute(
-                "INSERT INTO activity_stores VALUES(?,?,?) ON CONFLICT(device_id) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
-                (device_id, payload, utc_now()),
-            )
+        self._save_document("activity_stores", device_id, activity)
+
+    def patch_activity_store(self, device_id, delta, base_hash, target_hash):
+        self._patch_document("activity_stores", device_id, delta, base_hash, target_hash)
 
     def activity_store(self, device_id):
-        with self.connect() as db:
-            row = db.execute("SELECT payload,updated_at FROM activity_stores WHERE device_id=?", (device_id,)).fetchone()
-        return ({"activity": json.loads(row["payload"]), "updated_at": row["updated_at"]} if row else None)
+        payload, updated_at = self._load_document("activity_stores", device_id)
+        return ({"activity": payload, "updated_at": updated_at} if payload else None)
 
     def queue(self, device_id, command):
         payload = json.dumps(command, ensure_ascii=False, separators=(",", ":"))
@@ -467,15 +545,45 @@ class BackendServer:
                     }, {"Set-Cookie": self.session_cookie_header(raw)})
                 if parsed.path == PREFIX + "/api/v1/agent/snapshot":
                     if not self.agent_authorized(): return self.error(HTTPStatus.UNAUTHORIZED, "Authentification appareil refusée")
-                    if payload.get("device_id") != owner.device_id or not isinstance(payload.get("snapshot"), dict):
+                    if payload.get("device_id") != owner.device_id:
                         return self.error(HTTPStatus.BAD_REQUEST, "Charge utile appareil invalide")
-                    owner.store.save_snapshot(owner.device_id, payload["snapshot"])
+                    try:
+                        if isinstance(payload.get("snapshot"), dict):
+                            owner.store.save_snapshot(owner.device_id, payload["snapshot"])
+                        elif isinstance(payload.get("snapshot_delta"), dict):
+                            owner.store.patch_snapshot(
+                                owner.device_id,
+                                payload["snapshot_delta"],
+                                payload.get("base_hash"),
+                                payload.get("target_hash"),
+                            )
+                        else:
+                            return self.error(HTTPStatus.BAD_REQUEST, "Snapshot invalide")
+                    except DocumentConflict as error:
+                        return self.error(HTTPStatus.CONFLICT, str(error))
+                    except ValueError as error:
+                        return self.error(HTTPStatus.BAD_REQUEST, str(error))
                     return self.json(HTTPStatus.OK, {"ok": True})
                 if parsed.path == PREFIX + "/api/v1/agent/activity":
                     if not self.agent_authorized(): return self.error(HTTPStatus.UNAUTHORIZED, "Authentification appareil refusée")
-                    if payload.get("device_id") != owner.device_id or not isinstance(payload.get("activity"), dict):
+                    if payload.get("device_id") != owner.device_id:
                         return self.error(HTTPStatus.BAD_REQUEST, "Base d’activité invalide")
-                    owner.store.save_activity_store(owner.device_id, payload["activity"])
+                    try:
+                        if isinstance(payload.get("activity"), dict):
+                            owner.store.save_activity_store(owner.device_id, payload["activity"])
+                        elif isinstance(payload.get("activity_delta"), dict):
+                            owner.store.patch_activity_store(
+                                owner.device_id,
+                                payload["activity_delta"],
+                                payload.get("base_hash"),
+                                payload.get("target_hash"),
+                            )
+                        else:
+                            return self.error(HTTPStatus.BAD_REQUEST, "Base d’activité invalide")
+                    except DocumentConflict as error:
+                        return self.error(HTTPStatus.CONFLICT, str(error))
+                    except ValueError as error:
+                        return self.error(HTTPStatus.BAD_REQUEST, str(error))
                     return self.json(HTTPStatus.OK, {"ok": True, "stored_at": utc_now()})
                 if parsed.path == PREFIX + "/api/v1/agent/users":
                     if not self.agent_authorized(): return self.error(HTTPStatus.UNAUTHORIZED, "Authentification appareil refusée")

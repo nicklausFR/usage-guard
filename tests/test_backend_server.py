@@ -10,7 +10,7 @@ from urllib.request import Request, urlopen
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from usage_guard_backend.server import BackendServer, Store
+from usage_guard_backend.server import BackendServer, Store, json_hash
 
 
 PUBLIC_ORIGIN = "https://example.test"
@@ -99,6 +99,77 @@ class BackendServerTest(unittest.TestCase):
         self.assertTrue(saved["ok"])
         _, restored, _ = self.request("/api/v1/agent/activity?device_id=pc-test", agent=True)
         self.assertEqual(restored["activity"], activity)
+
+    def test_activity_delta_is_applied_on_server(self):
+        activity = {
+            "version": 2,
+            "days": {"2026-08-13": {"app:test": 12}},
+            "app_limit_settings": {},
+        }
+        updated = {
+            "version": 2,
+            "days": {"2026-08-13": {"app:test": 18}},
+            "app_limit_settings": {},
+        }
+        delta = {
+            "kind": "dict",
+            "remove": [],
+            "set": {},
+            "patch": {
+                "days": {
+                    "kind": "dict",
+                    "remove": [],
+                    "set": {},
+                    "patch": {
+                        "2026-08-13": {
+                            "kind": "dict",
+                            "remove": [],
+                            "set": {},
+                            "patch": {
+                                "app:test": {"kind": "value", "value": 18},
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        self.request(
+            "/api/v1/agent/activity", "POST",
+            {"device_id": "pc-test", "activity": activity}, True,
+        )
+        status, saved, _ = self.request(
+            "/api/v1/agent/activity", "POST",
+            {
+                "device_id": "pc-test",
+                "activity_delta": delta,
+                "base_hash": json_hash(activity),
+                "target_hash": json_hash(updated),
+            },
+            True,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(saved["ok"])
+        _, restored, _ = self.request("/api/v1/agent/activity?device_id=pc-test", agent=True)
+        self.assertEqual(restored["activity"], updated)
+
+    def test_activity_delta_conflict_returns_409(self):
+        activity = {"version": 2, "days": {}, "app_limit_settings": {}}
+        self.request(
+            "/api/v1/agent/activity", "POST",
+            {"device_id": "pc-test", "activity": activity}, True,
+        )
+        with self.assertRaises(HTTPError) as error:
+            self.request(
+                "/api/v1/agent/activity", "POST",
+                {
+                    "device_id": "pc-test",
+                    "activity_delta": {"kind": "dict", "remove": [], "set": {"version": 3}, "patch": {}},
+                    "base_hash": "stale",
+                    "target_hash": json_hash({"version": 3, "days": {}, "app_limit_settings": {}}),
+                },
+                True,
+            )
+        self.assertEqual(error.exception.code, 409)
 
     def test_successful_login_queues_a_notification_when_requested(self):
         self.request(

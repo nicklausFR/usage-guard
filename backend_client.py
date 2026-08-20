@@ -3,10 +3,67 @@ import json
 import os
 import threading
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from usage_guard import APP_NAME, config, debug_log
+
+
+def _json_hash(value):
+    import hashlib
+    raw = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _json_delta(old, new):
+    if old == new:
+        return None
+
+    if isinstance(old, dict) and isinstance(new, dict):
+        removed = [key for key in old if key not in new]
+        added = {key: new[key] for key in new if key not in old}
+        patched = {}
+        for key in old.keys() & new.keys():
+            child = _json_delta(old[key], new[key])
+            if child is not None:
+                patched[key] = child
+        return {
+            "kind": "dict",
+            "remove": removed,
+            "set": added,
+            "patch": patched,
+        }
+
+    if isinstance(old, list) and isinstance(new, list):
+        start = 0
+        while (
+            start < len(old)
+            and start < len(new)
+            and old[start] == new[start]
+        ):
+            start += 1
+
+        old_stop = len(old)
+        new_stop = len(new)
+        while (
+            old_stop > start
+            and new_stop > start
+            and old[old_stop - 1] == new[new_stop - 1]
+        ):
+            old_stop -= 1
+            new_stop -= 1
+
+        return {
+            "kind": "list",
+            "start": start,
+            "stop": old_stop,
+            "items": new[start:new_stop],
+        }
+
+    return {"kind": "value", "value": new}
 
 
 def backend_settings_path():
@@ -42,6 +99,8 @@ class BackendClient:
         self.poll_seconds = max(5, int(settings.get("poll_seconds", 15)))
         self._stop = threading.Event()
         self._thread = None
+        self._last_activity = None
+        self._last_snapshot = None
 
     @property
     def configured(self):
@@ -90,22 +149,73 @@ class BackendClient:
 
     def _publish_state(self):
         if self.activity_provider:
-            remote = self._request("GET", "/api/v1/agent/activity?" + urlencode({"device_id": self.device_id}))
             local = self.activity_provider()
-            if remote.get("activity") and not local.get("days") and self.activity_importer:
-                self.activity_importer(remote["activity"])
-                local = self.activity_provider()
-            self._request("POST", "/api/v1/agent/activity", {
-                "device_id": self.device_id, "activity": local,
-            })
+
+            if self._last_activity is None:
+                remote = self._request(
+                    "GET",
+                    "/api/v1/agent/activity?"
+                    + urlencode({"device_id": self.device_id}),
+                )
+                if (
+                    remote.get("activity")
+                    and not local.get("days")
+                    and self.activity_importer
+                ):
+                    self.activity_importer(remote["activity"])
+                    local = self.activity_provider()
+
+                if remote.get("activity"):
+                    self._last_activity = remote["activity"]
+
+            self._last_activity = self._publish_document(
+                "/api/v1/agent/activity",
+                "activity",
+                self._last_activity,
+                local,
+            )
+
         snapshot = self.snapshot_provider()
         if "error" not in snapshot:
             analysis = self.snapshot_provider({"scope": "all"})
             if "error" not in analysis:
                 snapshot["analysis"] = analysis
-            self._request("POST", "/api/v1/agent/snapshot", {
-                "device_id": self.device_id, "snapshot": snapshot,
+
+            self._last_snapshot = self._publish_document(
+                "/api/v1/agent/snapshot",
+                "snapshot",
+                self._last_snapshot,
+                snapshot,
+            )
+
+    def _publish_document(self, path, field, previous, current):
+        if previous is None:
+            self._request("POST", path, {
+                "device_id": self.device_id,
+                field: current,
             })
+            return current
+
+        delta = _json_delta(previous, current)
+        if delta is None:
+            return current
+
+        try:
+            self._request("POST", path, {
+                "device_id": self.device_id,
+                f"{field}_delta": delta,
+                "base_hash": _json_hash(previous),
+                "target_hash": _json_hash(current),
+            })
+        except HTTPError as error:
+            if error.code != 409:
+                raise
+            self._request("POST", path, {
+                "device_id": self.device_id,
+                field: current,
+            })
+
+        return current
 
     def list_users(self):
         return self._request(
@@ -144,6 +254,6 @@ class BackendClient:
                 "Content-Type": "application/json", "Accept": "application/json",
             },
         )
-        with urlopen(request, timeout=10) as response:  # nosec B310
+        with urlopen(request, timeout=60) as response:  # nosec B310
             content = response.read().decode("utf-8")
         return json.loads(content) if content else {}
