@@ -23,6 +23,15 @@ class BrowserExtensionUiTest(unittest.TestCase):
         self.assertIn("banner.append(label, progress, countdown, bonus)", script)
         self.assertNotIn("clear:both", script)
 
+    def test_private_tabs_are_published_without_their_url(self):
+        script = (
+            Path(__file__).parents[1] / "browser_extension" / "background.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("if (tab?.incognito) {", script)
+        self.assertIn("JSON.stringify({generic: true, audible: !!tab.audible})", script)
+        self.assertIn("tabs.filter((tab) => !tab.incognito)", script)
+
 
 if __name__ == "__main__":
     unittest.main()

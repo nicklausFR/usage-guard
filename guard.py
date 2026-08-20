@@ -1,6 +1,7 @@
 import time
 import json
 import getpass
+import uuid
 from queue import Empty, Queue
 from threading import Event
 from datetime import date, datetime, timedelta
@@ -22,6 +23,7 @@ from usage_guard import (
 class MonitoringService(QObject):
     state_changed = Signal()
     notification_requested = Signal(str, str, int)
+    email_notification_requested = Signal(str, str, str)
 
     def __init__(self):
         super().__init__()
@@ -65,6 +67,7 @@ class MonitoringService(QObject):
             int(getattr(config, "POTPLAYER_WARNING_SECONDS", 5)),
         )
         self.app_limiter.notification_requested.connect(self.notification_requested.emit)
+        self.app_limiter.email_notification_requested.connect(self.email_notification_requested.emit)
         self._notification_thresholds_shown = set()
         browser_bridge.set_limit_provider(self.app_limiter.web_limit_for_url)
         self.timer = QTimer(self)
@@ -347,14 +350,18 @@ class MonitoringService(QObject):
             })
         if hasattr(self.app_limiter, "prune_expired_limits"):
             self.app_limiter.prune_expired_limits()
-        limits = []
-        for key, policy in self.app_limiter.policies.items():
-            limits.append({
-                "target_key": key,
-                "label": self.app_limiter.label_for_key(key),
-                **policy,
-                **self.app_limiter.current_status(key),
-            })
+        if hasattr(self.app_limiter, "limits"):
+            limits = self.app_limiter.limits()
+        else:
+            limits = []
+            for key, policy in self.app_limiter.policies.items():
+                limits.append({
+                    "key": key,
+                    "target_key": policy.get("target_key", key),
+                    "label": self.app_limiter.label_for_key(key),
+                    **policy,
+                    **self.app_limiter.current_status(key),
+                })
         notification_rules = []
         for rule in self.usage.notification_rules():
             target_key = str(rule.get("target_key", ""))
@@ -657,6 +664,48 @@ class MonitoringService(QObject):
                 request["done"].set()
 
     def _apply_remote_command(self, command):
+        command_id = str(command.get("_remote_command_id") or "")
+        if command_id:
+            results = self.usage.data.setdefault("remote_command_results", {})
+            if command_id in results and self._remote_command_result_reflected(command, results[command_id]):
+                return dict(results[command_id])
+        result = self._apply_remote_command_once(command)
+        if command_id and result.get("ok"):
+            results = self.usage.data.setdefault("remote_command_results", {})
+            results[command_id] = json.loads(json.dumps(result))
+            for old_id in sorted(results, key=lambda value: int(value) if str(value).isdigit() else 0)[:-200]:
+                results.pop(old_id, None)
+            self.usage.save(force=True)
+        return result
+
+    def _remote_command_result_reflected(self, command, result):
+        if not isinstance(result, dict) or not result.get("ok"):
+            return False
+        action = command.get("action")
+        if action == "set_limit":
+            limit = result.get("limit") if isinstance(result.get("limit"), dict) else {}
+            key = str(limit.get("key") or command.get("target_key") or "")
+            return bool(key and key in self.app_limiter.policies)
+        if action == "remove_limit":
+            return str(command.get("target_key") or "") not in self.app_limiter.policies
+        if action == "set_computer_block":
+            expected = result.get("computer_block") if isinstance(result.get("computer_block"), dict) else {}
+            current = self.usage.data.get("computer_block", {})
+            if not expected or not current.get("mode"):
+                return False
+            return all(
+                str(current.get(key, "")) == str(expected.get(key, ""))
+                for key in ("mode", "started_at", "ends_at")
+            )
+        if action == "set_computer_block_enabled":
+            expected = result.get("computer_block") if isinstance(result.get("computer_block"), dict) else {}
+            current = self.usage.data.get("computer_block", {})
+            return bool(current.get("mode")) and bool(current.get("enabled", True)) == bool(expected.get("enabled", True))
+        if action == "clear_computer_block":
+            return not bool(self.usage.data.get("computer_block", {}).get("mode"))
+        return True
+
+    def _apply_remote_command_once(self, command):
         action = command.get("action")
         if action == "snapshot":
             return self.remote_snapshot(command.get("selection"))
@@ -733,24 +782,19 @@ class MonitoringService(QObject):
                 if pending else
                 f"{actor} a limité l’usage de l’ordinateur jusqu’au {end}."
             )
-            if any(
-                rule.get("enabled") and rule.get("kind") == "computer_block_change"
-                for rule in self.usage.data.get("notification_rules", [])
-            ):
-                self.notification_requested.emit(title, message, 0)
+            rules = [rule for rule in self.usage.data.get("notification_rules", []) if rule.get("enabled") and rule.get("kind") == "computer_block_change"]
+            self._dispatch_notification_rules(rules, title, message, 0)
             return {"ok": True, "computer_block": block}
         if action == "set_computer_block_enabled":
             actor = self._limit_actor_label(command.get("actor"))
             enabled = bool(command.get("enabled"))
             block = self.usage.set_computer_block_enabled(enabled)
             self.app_limiter.refresh_computer_block()
-            if any(
-                rule.get("enabled") and rule.get("kind") == "computer_block_change"
-                for rule in self.usage.data.get("notification_rules", [])
-            ):
+            rules = [rule for rule in self.usage.data.get("notification_rules", []) if rule.get("enabled") and rule.get("kind") == "computer_block_change"]
+            if rules:
                 state = "activée" if enabled else "désactivée"
                 action_label = "activé" if enabled else "désactivé"
-                self.notification_requested.emit(
+                self._dispatch_notification_rules(rules,
                     f"Limitation {state} par {actor} — Usage Guard",
                     f"{actor} a {action_label} la limitation de l’usage de l’ordinateur.", 0,
                 )
@@ -759,17 +803,28 @@ class MonitoringService(QObject):
             actor = self._limit_actor_label(command.get("actor"))
             self.usage.clear_computer_block()
             self.app_limiter.refresh_computer_block()
-            if any(
-                rule.get("enabled") and rule.get("kind") == "computer_block_change"
-                for rule in self.usage.data.get("notification_rules", [])
-            ):
-                self.notification_requested.emit(
+            rules = [rule for rule in self.usage.data.get("notification_rules", []) if rule.get("enabled") and rule.get("kind") == "computer_block_change"]
+            if rules:
+                self._dispatch_notification_rules(rules,
                     f"Limitation levée par {actor} — Usage Guard",
                     f"{actor} a levé la limitation de l’usage de l’ordinateur.", 0,
                 )
             return {"ok": True}
         if action == "notify_pwa_login":
-            self._notify_pwa_login(command.get("actor"), command.get("ip"))
+            self._notify_pwa_login(
+                command.get("actor"), command.get("ip"),
+                windows_only=bool(command.get("windows_only")),
+            )
+            return {"ok": True}
+        if action == "notify_client_presence":
+            connected = bool(command.get("connected"))
+            self.notification_requested.emit(
+                "Client connecté — Usage Guard" if connected else "Client déconnecté — Usage Guard",
+                "Le client Usage Guard vient de se connecter au serveur."
+                if connected else
+                "Le client Usage Guard ne communiquait plus avec le serveur.",
+                0,
+            )
             return {"ok": True}
         if action == "rename_target":
             self.usage.rename_target(str(command["target_key"]), str(command["label"]))
@@ -858,12 +913,18 @@ class MonitoringService(QObject):
         if not target_key.startswith(("app:", "site:", "category:")):
             raise ValueError("Cible de limite non prise en charge.")
         if action == "set_limit":
+            requested_settings = dict(command["settings"])
+            create_new = bool(requested_settings.pop("create_new", False))
+            measured_target_key = str(requested_settings.get("target_key") or target_key)
+            is_existing_rule = target_key in self.app_limiter.policies
+            if create_new and is_existing_rule:
+                target_key = f"{measured_target_key}#{uuid.uuid4().hex[:8]}"
+            requested_settings["target_key"] = measured_target_key
             existed = target_key in self.app_limiter.policies
             was_enabled = (
                 bool(self.app_limiter.policies[target_key].get("enabled"))
                 if existed else None
             )
-            requested_settings = dict(command["settings"])
             if not existed:
                 requested_settings["enabled"] = True
             settings = self.app_limiter.apply_settings(target_key, requested_settings)
@@ -871,7 +932,7 @@ class MonitoringService(QObject):
                 self._notify_limit_toggle(target_key, bool(settings.get("enabled")), command.get("actor"))
             else:
                 self._notify_limit_change(target_key, "modifiée" if existed else "créée", command.get("actor"))
-            return {"ok": True, "limit": {"target_key": target_key, **settings}}
+            return {"ok": True, "limit": {"key": target_key, **settings}}
         if action == "remove_limit":
             label = self.app_limiter.label_for_key(target_key)
             self.app_limiter.remove_limit(target_key)
@@ -887,46 +948,68 @@ class MonitoringService(QObject):
     def _notify_limit_change(self, target_key, verb, actor=None, label=None):
         actor = self._limit_actor_label(actor)
         label = label or self.app_limiter.label_for_key(target_key)
-        for rule in self.usage.data.get("notification_rules", []):
-            if not rule.get("enabled") or rule.get("kind") != "limit_change":
-                continue
-            watched = str(rule.get("target_key", ""))
-            if watched and watched != target_key:
-                continue
-            self.notification_requested.emit(
-                f"Limite {verb} par {actor} — Usage Guard",
-                f"{actor} a {dict(créée='créé', modifiée='modifié', supprimée='supprimé').get(verb, verb)} la limite « {label} ».",
-                0,
-            )
+        rules = [
+            rule for rule in self.usage.data.get("notification_rules", [])
+            if rule.get("enabled") and rule.get("kind") == "limit_change"
+            and (not str(rule.get("target_key", "")) or str(rule.get("target_key")) == target_key)
+        ]
+        self._dispatch_notification_rules(
+            rules,
+            f"Limite {verb} par {actor} — Usage Guard",
+            f"{actor} a {dict(créée='créé', modifiée='modifié', supprimée='supprimé').get(verb, verb)} la limite « {label} ».",
+            0,
+        )
 
     def _notify_limit_toggle(self, target_key, enabled, actor=None):
-        if not any(
-            rule.get("enabled") and rule.get("kind") == "limit_change"
-            for rule in self.usage.data.get("notification_rules", [])
-        ):
+        rules = [
+            rule for rule in self.usage.data.get("notification_rules", [])
+            if rule.get("enabled") and rule.get("kind") == "limit_change"
+            and (not str(rule.get("target_key", "")) or str(rule.get("target_key")) == target_key)
+        ]
+        if not rules:
             return
         actor = self._limit_actor_label(actor)
         label = self.app_limiter.label_for_key(target_key)
         state = "activée" if enabled else "désactivée"
         action = "activé" if enabled else "désactivé"
-        self.notification_requested.emit(
+        self._dispatch_notification_rules(rules,
             f"Limite {state} par {actor} — Usage Guard",
             f"{actor} a {action} la limite « {label} ».",
             0,
         )
 
-    def _notify_pwa_login(self, actor=None, ip=None):
-        if not any(
-            rule.get("enabled") and rule.get("kind") == "pwa_login"
-            for rule in self.usage.data.get("notification_rules", [])
-        ):
+    def _notify_pwa_login(self, actor=None, ip=None, windows_only=False):
+        rules = [
+            rule for rule in self.usage.data.get("notification_rules", [])
+            if rule.get("enabled") and rule.get("kind") == "pwa_login"
+        ]
+        if windows_only:
+            rules = [
+                {**rule, "channels": ["windows"]}
+                for rule in rules
+                if "windows" in (rule.get("channels") or ["windows"])
+            ]
+        if not rules:
             return
         actor = str(actor or "Utilisateur inconnu")
         location = f" depuis {ip}" if ip else ""
-        self.notification_requested.emit(
+        self._dispatch_notification_rules(rules,
             f"{actor} connecté à la PWA — Usage Guard",
             f"{actor} vient de se connecter à la PWA{location}.", 0,
         )
+
+    def _dispatch_notification_rules(self, rules, title, message, process_id=0):
+        rules = [rule for rule in rules if rule.get("enabled")]
+        if any("windows" in (rule.get("channels") or ["windows"]) for rule in rules):
+            self.notification_requested.emit(title, message, int(process_id or 0))
+        recipients = {
+            str(rule.get("email_recipient", "")).strip()
+            for rule in rules
+            if "email" in (rule.get("channels") or ["windows"])
+            and str(rule.get("email_recipient", "")).strip()
+        }
+        for recipient in sorted(recipients):
+            self.email_notification_requested.emit(title, message, recipient)
 
     @staticmethod
     def _limit_actor_label(actor=None):
@@ -946,7 +1029,7 @@ class MonitoringService(QObject):
                 continue
             if weekday not in {int(value) for value in rule.get("weekdays", [])}:
                 continue
-            self.notification_requested.emit(
+            self._dispatch_notification_rules([rule],
                 str(rule.get("label") or "Rappel — Usage Guard"),
                 str(rule.get("description") or "Rappel programmé au démarrage."),
                 0,
@@ -992,7 +1075,7 @@ class MonitoringService(QObject):
                 if reached:
                     active_tokens.add(token)
                     if token not in self._notification_thresholds_shown:
-                        self.notification_requested.emit(
+                        self._dispatch_notification_rules([rule],
                             str(rule.get("label") or "Horaire atteint — Usage Guard"),
                             f"{label} est utilisé après l’heure définie ({after_time}).",
                             0,
@@ -1023,7 +1106,7 @@ class MonitoringService(QObject):
                 if reached:
                     active_tokens.add(token)
                     if token not in self._notification_thresholds_shown:
-                        self.notification_requested.emit(
+                        self._dispatch_notification_rules([rule],
                             str(rule.get("label") or "Durée atteinte — Usage Guard"),
                             f"{label} a atteint {self.app_limiter._format_duration(threshold_seconds)} d’utilisation.",
                             0,
@@ -1039,7 +1122,7 @@ class MonitoringService(QObject):
             if reached:
                 active_tokens.add(token)
                 if token not in self._notification_thresholds_shown:
-                    self.notification_requested.emit(
+                    self._dispatch_notification_rules([rule],
                         str(rule.get("label") or "Seuil d’usage atteint"),
                         f"{self.app_limiter.label_for_key(target_key)} a atteint {threshold} % de sa limite.",
                         0,

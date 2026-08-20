@@ -17,6 +17,7 @@ class BrowserTab:
     url: str = ""
     title: str = ""
     audible: bool = False
+    generic: bool = False
     received_at: float = 0.0
 
 
@@ -82,6 +83,17 @@ class BrowserBridge:
                         with bridge._lock:
                             bridge._extension_requests.append(target_key)
                         self._send_json({"accepted": True})
+                        return
+                    generic = bool(payload.get("generic"))
+                    if generic:
+                        with bridge._lock:
+                            bridge._tab = BrowserTab(
+                                title="",
+                                audible=bool(payload.get("audible", False)),
+                                generic=True,
+                                received_at=time.monotonic(),
+                            )
+                        self._send_json({"limit": None})
                         return
                     url = str(payload.get("url", ""))
                     if not url.startswith(("http://", "https://")):

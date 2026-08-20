@@ -64,6 +64,9 @@ backend_client = BackendClient(
         activity_provider=tray_source.service.request_activity_store,
         activity_importer=tray_source.service.import_activity_store,
 )
+tray_source.service.email_notification_requested.connect(
+    lambda title, message, recipient: backend_client.queue_email_notification(title, message, recipient)
+)
 remote_server = None
 if bool(getattr(config, "REMOTE_API_ENABLED", True)):
     remote_server = RemoteControlServer(

@@ -198,6 +198,7 @@ class AppLimiter(QObject):
     """Manage independent daily foreground limits for configured applications."""
 
     notification_requested = Signal(str, str, int)
+    email_notification_requested = Signal(str, str, str)
 
     def __init__(self, usage, limit_seconds=15, extension_seconds=15, warning_seconds=5):
         super().__init__()
@@ -231,6 +232,37 @@ class AppLimiter(QObject):
         block = dict(self.usage.data.get("computer_block", {}))
         try:
             now = now or datetime.now().astimezone()
+            if block.get("enabled") and block.get("mode") == "daily_duration":
+                policy = {
+                    "valid_from": block.get("valid_from", ""),
+                    "valid_from_time": block.get("valid_from_time", ""),
+                    "valid_until": block.get("valid_until", ""),
+                    "valid_until_time": block.get("valid_until_time", ""),
+                    "schedule_start": block.get("schedule_start", ""),
+                    "schedule_end": block.get("schedule_end", ""),
+                }
+                schedule = self._schedule_status(policy, now)
+                used = float(
+                    self.usage.system_usage_for_day(now.date()).get("on", 0.0)
+                )
+                allowed = max(60, int(block.get("limit_seconds", 60)))
+                end = self._schedule_window_end(policy, now) or datetime.combine(
+                    now.date() + timedelta(days=1), datetime.min.time()
+                ).replace(tzinfo=now.tzinfo)
+                active = bool(schedule["active"] and used >= allowed)
+                pending = bool(schedule["pending"] or (schedule["active"] and used < allowed))
+                return {
+                    **block,
+                    "started_at": now.isoformat(timespec="seconds"),
+                    "ends_at": end.isoformat(timespec="seconds"),
+                    "active": active,
+                    "pending": pending,
+                    "seconds": round(used, 1),
+                    "allowed": allowed,
+                    "remaining": max(0.0, allowed - used),
+                    "schedule_active": schedule["active"],
+                    "schedule_pending": schedule["pending"],
+                }
             if block.get("enabled") and block.get("mode") == "schedule":
                 start_time = datetime.strptime(block["daily_start"], "%H:%M").time()
                 end_time = datetime.strptime(block["daily_end"], "%H:%M").time()
@@ -350,10 +382,11 @@ class AppLimiter(QObject):
                         continue
                     self._computer_block_warning_shown.add(token)
                     actor = str(status.get("actor") or "Utilisateur local")
-                    self.notification_requested.emit(
+                    self._emit_notification(
+                        "limit_warning", "computer:all",
                         f"Blocage imminent demandé par {actor} — Usage Guard",
                         f"La limitation de l’ordinateur commencera dans {self._format_duration(remaining)} et durera jusqu’au {datetime.fromisoformat(status['ends_at']).astimezone().strftime('%d/%m/%Y à %H:%M')}.",
-                        0,
+                        0, rule_id=rule_id,
                     )
             if (
                 status.get("enabled")
@@ -416,10 +449,12 @@ class AppLimiter(QObject):
         }
         for key, policy in self.policies.items():
             self.usage.prepare_app_limit(
-                key, policy["limit_seconds"], policy["extension_seconds"]
+                key, policy["limit_seconds"], policy["extension_seconds"],
+                measured_target_key=self._policy_target_key(key, policy),
             )
 
     def label_for_key(self, target_key):
+        target_key = self._policy_target_key(target_key)
         if str(target_key).startswith("category:"):
             return f"Catégorie · {str(target_key).removeprefix('category:')}"
         metadata = self.usage.data.get("targets", {}).get(target_key, {})
@@ -427,15 +462,77 @@ class AppLimiter(QObject):
         return f"Site · {label}" if str(target_key).startswith("site:") else label
 
     def _notification_enabled(self, kind, target_key):
+        return bool(self._notification_rules(kind, target_key))
+
+    def _notification_rules(self, kind, target_key):
+        matches = []
         for rule in self.usage.data.get("notification_rules", []):
             if not rule.get("enabled") or rule.get("kind") != kind:
                 continue
             if kind == "limited_app_start":
-                return True
+                matches.append(rule)
+                continue
             watched = str(rule.get("target_key", ""))
             if not watched or watched == target_key:
-                return True
-        return False
+                matches.append(rule)
+        return matches
+
+    def _emit_notification(self, kind, target_key, title, message, process_id=0, rule_id=None):
+        if rule_id is None:
+            rules = self._notification_rules(kind, target_key)
+        else:
+            rules = [
+                rule for index, rule in enumerate(self.usage.data.get("notification_rules", []))
+                if rule.get("enabled")
+                and str(rule.get("id") or f"legacy-{index}") == str(rule_id)
+            ]
+        if any("windows" in (rule.get("channels") or ["windows"]) for rule in rules):
+            self.notification_requested.emit(title, message, int(process_id or 0))
+        signal = getattr(self, "email_notification_requested", None)
+        recipients = {
+            str(rule.get("email_recipient", "")).strip()
+            for rule in rules
+            if "email" in (rule.get("channels") or ["windows"])
+            and str(rule.get("email_recipient", "")).strip()
+        }
+        for recipient in sorted(recipients):
+            if signal is not None:
+                signal.emit(title, message, recipient)
+
+    def _notify_limit_reached(self, target_key, state):
+        token = (
+            target_key,
+            f"duration-reached:{int(bool(state.get('extension_used')))}:{date.today().isoformat()}",
+        )
+        if token in self._warning_shown or not self._notification_enabled("limit_warning", target_key):
+            return
+        self._warning_shown.add(token)
+        self._emit_notification(
+            "limit_warning", target_key,
+            f"{self.target_label} — limite atteinte",
+            "La durée autorisée est atteinte. L’utilisation est maintenant bloquée.",
+            self.target_process_id,
+        )
+
+    def _notify_extension_started(self, target_key, state, policy):
+        if (
+            not state.get("extension_used")
+            or float(state.get("seconds", 0)) < float(policy.get("limit_seconds", 0))
+            or int(policy.get("extension_seconds", 0)) <= 0
+            or not self._notification_enabled("limit_extension", target_key)
+        ):
+            return
+        token = (target_key, f"extension-start:{date.today().isoformat()}")
+        if token in self._warning_shown:
+            return
+        self._warning_shown.add(token)
+        self._emit_notification(
+            "limit_extension", target_key,
+            f"{self.target_label} — joker utilisé",
+            "La durée normale est dépassée. "
+            f"Le joker de {self._format_duration(policy['extension_seconds'])} est actif.",
+            self.target_process_id,
+        )
 
     def available_targets(self):
         keys = set(self.usage.data.get("targets", {}))
@@ -457,11 +554,15 @@ class AppLimiter(QObject):
 
     def limits(self):
         return [
-            {"key": key, "label": self.label_for_key(key), **policy, **self.current_status(key)}
+            {"key": key, "target_key": self._policy_target_key(key, policy), "label": self.label_for_key(key), **policy, **self.current_status(key)}
             for key, policy in sorted(
                 self.policies.items(), key=lambda item: self.label_for_key(item[0]).lower()
             )
         ]
+
+    def _policy_target_key(self, policy_key, policy=None):
+        policy = policy if policy is not None else self.policies.get(policy_key, {})
+        return self._canonical_limit_target(policy.get("target_key") or policy_key)
 
     @staticmethod
     def _normalized_app_name(value):
@@ -479,7 +580,7 @@ class AppLimiter(QObject):
     def _target_for_media_source(self, source):
         normalized_source = self._normalized_app_name(source)
         matches = []
-        target_keys = set(self.policies)
+        target_keys = {self._policy_target_key(key, policy) for key, policy in self.policies.items()}
         target_keys.update(self.usage.data.get("targets", {}))
         for raw_key in target_keys:
             if not str(raw_key).startswith("app:"):
@@ -545,9 +646,10 @@ class AppLimiter(QObject):
         for target_key, policy in self.policies.items():
             if not policy["enabled"]:
                 continue
-            if not target_key.startswith("app:"):
+            measured_target = self._policy_target_key(target_key, policy)
+            if not measured_target.startswith("app:"):
                 continue
-            windows = self._windows_for_target(target_key)
+            windows = self._windows_for_target(measured_target)
             if not windows:
                 continue
             handle, process_id = windows[0]
@@ -586,7 +688,8 @@ class AppLimiter(QObject):
                     if item.get("block_during_validity")
                     else f"Usage limité : {self._format_duration(item['limit_seconds'])}."
                 )
-                self.notification_requested.emit(
+                self._emit_notification(
+                    "limited_app_start", item["key"],
                     f"{item['label']} — Usage Guard",
                     message,
                     item["process_id"],
@@ -706,6 +809,9 @@ class AppLimiter(QObject):
         target_key = self._canonical_limit_target(target_key)
         if target_key in self.policies:
             matches.append(target_key)
+        for policy_key, policy in self.policies.items():
+            if self._policy_target_key(policy_key, policy) == target_key and policy_key not in matches:
+                matches.append(policy_key)
         metadata = self.usage.data.get("targets", {}).get(
             target_key, {}
         )
@@ -721,8 +827,11 @@ class AppLimiter(QObject):
         }
         for category in categories:
             key = f"category:{category}"
-            if category and key in self.policies and key not in matches:
-                matches.append(key)
+            if not category:
+                continue
+            for policy_key, policy in self.policies.items():
+                if self._policy_target_key(policy_key, policy) == key and policy_key not in matches:
+                    matches.append(policy_key)
         return matches
 
     def _consume_limit(
@@ -742,7 +851,8 @@ class AppLimiter(QObject):
                     if policy.get("block_during_validity")
                     else f"Usage limité : {self._format_duration(policy['limit_seconds'])}."
                 )
-                self.notification_requested.emit(
+                self._emit_notification(
+                    "limited_app_start", target_key,
                     f"{label} — Usage Guard",
                     message,
                     process_id,
@@ -756,23 +866,29 @@ class AppLimiter(QObject):
         if playback:
             self._playing_seen_at[target_key] = time.monotonic()
         state = self.usage.app_limit_state_for_day(target_key)
+        self._notify_extension_started(target_key, state, policy)
         allowed = 0 if policy.get("block_during_validity") else policy["limit_seconds"] + (
             policy["extension_seconds"] if state["extension_used"] else 0
         )
         cutoff_block_token = (target_key, f"cutoff-block:{date.today().isoformat()}")
         if status.get("time_blocked") and cutoff_block_token not in self._warning_shown and self._notification_enabled("limit_warning", target_key):
             self._warning_shown.add(cutoff_block_token)
-            self.notification_requested.emit(
+            self._emit_notification(
+                "limit_warning", target_key,
                 f"{self.target_label} — heure autorisée dépassée",
                 f"L’utilisation est interdite après {policy['blocked_after']}.",
                 self.target_process_id,
             )
         if state["seconds"] >= allowed or status.get("time_blocked"):
+            if state["seconds"] >= allowed:
+                self._notify_limit_reached(target_key, state)
             if not browser_managed:
                 self.block_target()
             return
         state = self.usage.add_app_limit_seconds(target_key, elapsed, date.today())
+        self._notify_extension_started(target_key, state, policy)
         if state["seconds"] >= allowed:
+            self._notify_limit_reached(target_key, state)
             if not browser_managed:
                 self.block_target()
             return
@@ -785,10 +901,11 @@ class AppLimiter(QObject):
             if remaining > warning_seconds or warning_token in self._warning_shown:
                 continue
             self._warning_shown.add(warning_token)
-            self.notification_requested.emit(
+            self._emit_notification(
+                "limit_warning", target_key,
                 f"{self.target_label} — bientôt terminé",
                 f"Il reste {self._format_duration(remaining)} avant le blocage.",
-                self.target_process_id,
+                self.target_process_id, rule_id=rule_id,
             )
         time_remaining = status.get("time_remaining")
         if time_remaining is not None and time_remaining > 0:
@@ -800,10 +917,11 @@ class AppLimiter(QObject):
                 if time_remaining > warning_seconds or cutoff_token in self._warning_shown:
                     continue
                 self._warning_shown.add(cutoff_token)
-                self.notification_requested.emit(
+                self._emit_notification(
+                    "limit_warning", target_key,
                     f"{self.target_label} — bientôt interdit",
                     f"Il reste {self._format_duration(time_remaining)} avant l’heure de fin autorisée.",
-                    self.target_process_id,
+                    self.target_process_id, rule_id=rule_id,
                 )
 
     def _refresh_web_limit(self, foreground_target):
@@ -855,8 +973,9 @@ class AppLimiter(QObject):
             if str(key).startswith("site:") and str(key).rsplit(":", 1)[-1] == host
         ]
         direct_keys = [
-            key for key in self.policies
-            if str(key).startswith("site:") and str(key).rsplit(":", 1)[-1] == host
+            key for key, policy in self.policies.items()
+            if self._policy_target_key(key, policy).startswith("site:")
+            and self._policy_target_key(key, policy).rsplit(":", 1)[-1] == host
         ]
         policy_keys = list(direct_keys)
         categories = set()
@@ -871,8 +990,11 @@ class AppLimiter(QObject):
         }
         for category in categories:
             category_key = f"category:{category}"
-            if category and category_key in self.policies and category_key not in policy_keys:
-                policy_keys.append(category_key)
+            if not category:
+                continue
+            for policy_key, policy in self.policies.items():
+                if self._policy_target_key(policy_key, policy) == category_key and policy_key not in policy_keys:
+                    policy_keys.append(policy_key)
 
         states = []
         for target_key in policy_keys:
@@ -900,7 +1022,8 @@ class AppLimiter(QObject):
         )
 
     def grant_web_extension(self, target_key):
-        if target_key not in self.policies or not target_key.startswith(("site:", "category:")):
+        measured_target = self._policy_target_key(target_key)
+        if target_key not in self.policies or not measured_target.startswith(("site:", "category:")):
             return False
         if self.policies[target_key].get("block_during_validity"):
             return False
@@ -922,7 +1045,8 @@ class AppLimiter(QObject):
             for name in ("limit_seconds", "extension_seconds")
         ):
             self.usage.prepare_app_limit(
-                target_key, normalized["limit_seconds"], normalized["extension_seconds"]
+                target_key, normalized["limit_seconds"], normalized["extension_seconds"],
+                measured_target_key=self._policy_target_key(target_key, normalized),
             )
             self._warning_shown = {token for token in self._warning_shown if token[0] != target_key}
         if self.blocked and target_key == self.target_key and not normalized["enabled"]:
@@ -1044,6 +1168,29 @@ class AppLimiter(QObject):
             if next_start >= validity_end:
                 return {"active": False, "pending": False}
         return {"active": False, "pending": True}
+
+    @staticmethod
+    def _schedule_window_end(policy, now=None):
+        start_text = str(policy.get("schedule_start", "")).strip()
+        end_text = str(policy.get("schedule_end", "")).strip()
+        if not start_text or not end_text:
+            return None
+        now = now or datetime.now().astimezone()
+        start_time = datetime.strptime(start_text, "%H:%M").time()
+        end_time = datetime.strptime(end_text, "%H:%M").time()
+        crosses_midnight = end_time < start_time
+        occurrence_days = [now.date()]
+        if crosses_midnight:
+            occurrence_days.insert(0, now.date() - timedelta(days=1))
+        for occurrence_day in occurrence_days:
+            start = datetime.combine(occurrence_day, start_time).replace(tzinfo=now.tzinfo)
+            end = datetime.combine(
+                occurrence_day + timedelta(days=1) if crosses_midnight else occurrence_day,
+                end_time,
+            ).replace(tzinfo=now.tzinfo)
+            if start <= now < end:
+                return end
+        return None
 
     @staticmethod
     def _cutoff_remaining(policy, now=None):

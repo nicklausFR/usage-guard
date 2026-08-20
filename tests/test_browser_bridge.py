@@ -11,6 +11,29 @@ from browser_bridge import BrowserBridge
 
 
 class BrowserBridgeInventoryTest(unittest.TestCase):
+    def test_generic_browser_activity_clears_the_previous_url(self):
+        bridge = BrowserBridge(port=0)
+        bridge.start()
+        try:
+            port = bridge._server.server_address[1]
+            for payload in (
+                {"url": "https://example.test"},
+                {"generic": True, "audible": False},
+            ):
+                request = Request(
+                    f"http://127.0.0.1:{port}/active",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}, method="POST",
+                )
+                with urlopen(request, timeout=2) as response:
+                    self.assertEqual(response.status, 200)
+            current = bridge.current()
+            self.assertTrue(current.generic)
+            self.assertEqual(current.url, "")
+            self.assertEqual(current.title, "")
+        finally:
+            bridge.stop()
+
     def test_extension_can_publish_complete_open_tab_inventory(self):
         bridge = BrowserBridge(port=0)
         bridge.start()

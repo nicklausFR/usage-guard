@@ -91,8 +91,12 @@ class RemoteControlServer:
                         snapshot = owner.snapshot_provider(selection)
                         status = HTTPStatus.SERVICE_UNAVAILABLE if "error" in snapshot else HTTPStatus.OK
                         return self._json(status, snapshot)
+                    if parsed.path == "/api/v1/backend/traffic":
+                        return self._backend_traffic("GET")
                     if parsed.path == "/api/v1/backend/users":
                         return self._backend_users("GET")
+                    if parsed.path == "/api/v1/backend/email":
+                        return self._backend_email("GET")
                     return self._json(HTTPStatus.NOT_FOUND, {"error": "Endpoint inconnu."})
                 return self._static(parsed.path)
 
@@ -113,6 +117,17 @@ class RemoteControlServer:
                 if not self._valid_host():
                     return self._json(HTTPStatus.MISDIRECTED_REQUEST, {"error": "Hôte refusé."})
                 parsed = urlparse(self.path)
+                if parsed.path in {"/api/v1/backend/email", "/api/v1/backend/email/test"}:
+                    if not self._authorized(parsed):
+                        return self._unauthorized()
+                    try:
+                        length = self._content_length()
+                        payload = json.loads(self.rfile.read(length).decode("utf-8")) if length else {}
+                        if not isinstance(payload, dict):
+                            raise ValueError
+                    except (ValueError, json.JSONDecodeError):
+                        return self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON invalide."})
+                    return self._backend_email("TEST" if parsed.path.endswith("/test") else "POST", payload)
                 if parsed.path == "/api/v1/actions":
                     if not self._authorized(parsed):
                         return self._unauthorized()
@@ -125,6 +140,10 @@ class RemoteControlServer:
                         return self._json(HTTPStatus.BAD_REQUEST, {"error": "JSON invalide."})
                     result = owner.command_handler(command)
                     return self._json(HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST, result)
+                if parsed.path == "/api/v1/backend/traffic/reset":
+                    if not self._authorized(parsed):
+                        return self._unauthorized()
+                    return self._backend_traffic("RESET")
                 if parsed.path == "/api/v1/backend/users" or (
                     parsed.path.startswith("/api/v1/backend/users/") and parsed.path.endswith("/access")
                 ):
@@ -151,6 +170,25 @@ class RemoteControlServer:
                 self.send_header("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE")
                 self.end_headers()
 
+            def _backend_traffic(self, method):
+                parsed = urlparse(self.path)
+                if not self._authorized(parsed):
+                    return self._unauthorized()
+                client = owner.backend_client
+                if client is None:
+                    return self._json(HTTPStatus.OK, {
+                        "enabled": False, "configured": False,
+                        "uploaded_bytes": 0, "elapsed_seconds": 0,
+                        "upload_rate_bytes_per_minute": 0,
+                        "reset_at": None, "last_upload_at": None,
+                    })
+                stats = (
+                    client.reset_traffic_stats()
+                    if method == "RESET"
+                    else client.traffic_stats()
+                )
+                return self._json(HTTPStatus.OK, stats)
+
             def _backend_users(self, method, payload=None):
                 parsed = urlparse(self.path)
                 if not self._authorized(parsed):
@@ -173,6 +211,30 @@ class RemoteControlServer:
                     else:
                         username = unquote(parsed.path.removeprefix("/api/v1/backend/users/"))
                         result = client.delete_user(username)
+                    return self._json(HTTPStatus.OK, result)
+                except Exception as error:
+                    message = getattr(error, "reason", None) or "Communication avec le backend impossible."
+                    if hasattr(error, "read"):
+                        try:
+                            message = json.loads(error.read().decode("utf-8")).get("error", message)
+                        except Exception:
+                            pass
+                    return self._json(HTTPStatus.BAD_GATEWAY, {"error": str(message)})
+
+            def _backend_email(self, method, payload=None):
+                parsed = urlparse(self.path)
+                if not self._authorized(parsed):
+                    return self._unauthorized()
+                client = owner.backend_client
+                if client is None or not client.configured:
+                    return self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Backend distant non configuré."})
+                try:
+                    if method == "GET":
+                        result = client.email_settings()
+                    elif method == "TEST":
+                        result = client.test_email_settings(payload.get("recipient"))
+                    else:
+                        result = client.save_email_settings(payload)
                     return self._json(HTTPStatus.OK, result)
                 except Exception as error:
                     message = getattr(error, "reason", None) or "Communication avec le backend impossible."

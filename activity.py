@@ -26,6 +26,7 @@ class ActiveContext:
     is_video_playing: bool = False
     background_media: list[str] = None
     browser_media_playing: bool = False
+    generic_web: bool = False
     idle_seconds: float = 0.0
     source: str = "fallback"
 
@@ -43,8 +44,15 @@ class ActivityProbe:
         # activity. ActivityWatch's AFK threshold is independent and can leave
         # a long tail after the user stops interacting.
         fallback_context = self._fallback.current()
-        bridge_tab = self._current_bridge_tab()
-        if bridge_tab is not None:
+        generic_web = (
+            _is_configured_browser(fallback_context.app_name)
+            and _is_private_browser_title(fallback_context.window_title)
+        )
+        if generic_web:
+            fallback_context.url = ""
+            fallback_context.generic_web = True
+        bridge_tab = None if generic_web else self._current_bridge_tab()
+        if bridge_tab is not None and not bridge_tab.generic:
             self._last_browser_url = bridge_tab.url
         bridge_context = self._browser_bridge_context(fallback_context)
         if bridge_context is not None:
@@ -52,9 +60,9 @@ class ActivityProbe:
         if getattr(config, "ACTIVITYWATCH_ENABLED", True):
             context = self.aw.current()
             if context is not None:
-                if context.url:
+                if context.url and not generic_web:
                     self._last_browser_url = context.url
-                shelf_source_url = _shelf_source_url(context.url)
+                shelf_source_url = "" if generic_web else _shelf_source_url(context.url)
                 if (
                     not shelf_source_url
                     and _is_shelf_popup_app(fallback_context.app_name)
@@ -82,7 +90,13 @@ class ActivityProbe:
                 context.app_name = fallback_context.app_name or context.app_name
                 context.window_title = fallback_context.window_title or context.window_title
                 context.window_handle = fallback_context.window_handle
-                if shelf_source_url:
+                if generic_web or (
+                    _is_configured_browser(context.app_name)
+                    and _is_private_browser_title(context.window_title)
+                ):
+                    context.url = ""
+                    context.generic_web = True
+                elif shelf_source_url:
                     # Attribute Shelf's standalone player to the configured
                     # browser and the real YouTube page, rather than to the
                     # Explorer-hosted popup or the extension URL.
@@ -123,6 +137,18 @@ class ActivityProbe:
         return self._fallback.running_applications()
 
     def _browser_bridge_context(self, fallback_context):
+        if (
+            _is_configured_browser(fallback_context.app_name)
+            and _is_private_browser_title(fallback_context.window_title)
+        ):
+            return ActiveContext(
+                app_name=fallback_context.app_name,
+                window_title=fallback_context.window_title,
+                window_handle=fallback_context.window_handle,
+                url="",
+                generic_web=True,
+                source="browser-extension",
+            )
         tab = self._current_bridge_tab()
         if tab is None:
             return None
@@ -138,8 +164,9 @@ class ActivityProbe:
             app_name=app_name,
             window_title=fallback_context.window_title or tab.title,
             window_handle=fallback_context.window_handle,
-            url=tab.url,
+            url="" if tab.generic else tab.url,
             browser_media_playing=tab.audible,
+            generic_web=tab.generic,
             source="browser-extension",
         )
 
@@ -195,6 +222,7 @@ class ActivityProbe:
         context.app_name = previous.app_name
         context.window_title = previous.window_title
         context.url = previous.url
+        context.generic_web = previous.generic_web
         return context
 
     def _remember_non_guard_context(self, context, foreground_context):
@@ -679,10 +707,19 @@ def _is_regular_browser_tab(title):
 
 def _host_url_from_title(title):
     title_text = str(title or "")
+    if _is_private_browser_title(title_text):
+        return ""
     match = re.search(r"\b(?:[a-z0-9-]+\.)+[a-z]{2,}\b", title_text, re.I)
     if not match and re.search(r"\bbbc\b", title_text, re.I):
         return "https://www.bbc.com/"
     return f"https://{match.group(0)}" if match else ""
+
+
+def _is_private_browser_title(title):
+    return bool(re.search(
+        r"\b(private|incognito|navigation privée|fenêtre privée)\b",
+        str(title or ""), re.I,
+    ))
 
 
 def _event_timestamp(event):

@@ -27,6 +27,19 @@ class AppUsageStoreBackupTest(unittest.TestCase):
 
 
 class AppUsageStoreSessionsTest(unittest.TestCase):
+    def test_generic_browser_activity_has_no_site_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+
+            target = store.target_for_context(ActiveContext(
+                app_name="brave.exe", window_title="Browser",
+                url="", generic_web=True,
+            ))
+
+            self.assertEqual(target.key, "site:brave.exe:other-sites")
+            self.assertEqual(target.label, "Autres sites")
+            self.assertEqual(target.detail_host, "")
+
     def test_renamed_target_label_is_used_for_new_sessions(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")
@@ -86,6 +99,35 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             store.remove_notification_rule(rule["id"])
             self.assertEqual(store.notification_rules(), [])
 
+    def test_notification_channels_and_recipient_are_persisted_per_rule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+
+            email_rule = store.set_notification_rule({
+                "kind": "pwa_login", "channels": ["email"],
+                "email_recipient": "alice@example.test",
+            })
+            both_rule = store.set_notification_rule({
+                "kind": "limit_change", "channels": ["windows", "email"],
+                "email_recipient": "bob@example.test",
+            })
+
+            self.assertEqual(email_rule["channels"], ["email"])
+            self.assertEqual(email_rule["email_recipient"], "alice@example.test")
+            self.assertEqual(both_rule["channels"], ["windows", "email"])
+            stored = (Path(directory) / "activity.json").read_text(encoding="utf-8")
+            self.assertNotIn("alice@example.test", stored)
+            self.assertNotIn("bob@example.test", stored)
+            reloaded = AppUsageStore(Path(directory) / "activity.json")
+            self.assertEqual(
+                reloaded.notification_rules()[0]["email_recipient"],
+                "alice@example.test",
+            )
+            with self.assertRaisesRegex(ValueError, "destinataire"):
+                store.set_notification_rule({
+                    "kind": "pwa_login", "channels": ["email"],
+                })
+
     def test_requested_notification_kinds_are_persisted(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")
@@ -95,7 +137,10 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
                     "extension_seconds": 900, "warning_seconds": 300,
                 }
             }
-            for kind in ("limited_app_start", "limit_warning", "usage_threshold"):
+            for kind in (
+                "limited_app_start", "limit_warning", "limit_extension",
+                "usage_threshold",
+            ):
                 rule = store.set_notification_rule({
                     "kind": kind, "target_key": "app:editor",
                     "warning_seconds": 420,
@@ -202,6 +247,36 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertIn("app:disabled", limiter.policies)
             self.assertIn("app:disabled", store.data["app_limit_settings"])
 
+    def test_duplicate_category_limit_rules_match_the_same_activity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["targets"]["app:game"] = {
+                "label": "Jeu", "category": "Jeux",
+            }
+            first = store.set_app_limit_settings("category:Jeux", {
+                "target_key": "category:Jeux",
+                "limit_seconds": 3600,
+                "extension_seconds": 900,
+                "warning_seconds": 300,
+            })
+            second = store.set_app_limit_settings("category:Jeux#abc12345", {
+                "target_key": "category:Jeux",
+                "limit_seconds": 600,
+                "extension_seconds": 0,
+                "warning_seconds": 60,
+            })
+            limiter = AppLimiter.__new__(AppLimiter)
+            limiter.usage = store
+            limiter.policies = {
+                "category:Jeux": first,
+                "category:Jeux#abc12345": second,
+            }
+
+            self.assertEqual(
+                limiter._policies_for_key("app:game"),
+                ["category:Jeux", "category:Jeux#abc12345"],
+            )
+
     def test_duration_and_hour_threshold_rules_keep_their_validity(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")
@@ -275,7 +350,7 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
                     "valid_until_time": "21:15",
                 })
 
-    def test_period_block_is_persisted_without_extension_or_daily_schedule(self):
+    def test_period_block_keeps_an_optional_daily_schedule(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")
             settings = store.set_app_limit_settings("app:test", {
@@ -292,11 +367,18 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertTrue(settings["block_during_validity"])
             self.assertEqual(settings["extension_seconds"], 0)
             self.assertEqual(settings["blocked_after"], "")
-            self.assertEqual(settings["schedule_start"], "")
-            self.assertEqual(settings["schedule_end"], "")
+            self.assertEqual(settings["schedule_start"], "09:00")
+            self.assertEqual(settings["schedule_end"], "17:00")
             self.assertTrue(store.app_limit_settings("app:test")["block_during_validity"])
 
-            with self.assertRaisesRegex(ValueError, "borne datée"):
+            schedule_only = store.set_app_limit_settings("app:test", {
+                "block_during_validity": True,
+                "schedule_start": "08:00", "schedule_end": "09:00",
+            })
+            self.assertTrue(schedule_only["block_during_validity"])
+            self.assertEqual(schedule_only["schedule_start"], "08:00")
+
+            with self.assertRaisesRegex(ValueError, "borne datée ou un créneau horaire"):
                 store.set_app_limit_settings("app:test", {
                     "block_during_validity": True,
                 })

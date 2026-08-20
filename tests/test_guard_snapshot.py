@@ -7,12 +7,36 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from activity import ActiveContext, ActivityProbe
+from activity import ActiveContext, ActivityProbe, _host_url_from_title
 from guard import MonitoringService
 from usage_guard import AppUsageStore
 
 
 class MonitoringServiceSnapshotTest(unittest.TestCase):
+    def test_notification_rules_dispatch_independent_windows_and_email_channels(self):
+        windows = []
+        emails = []
+        service = MonitoringService.__new__(MonitoringService)
+        service.notification_requested = SimpleNamespace(
+            emit=lambda *args: windows.append(args)
+        )
+        service.email_notification_requested = SimpleNamespace(
+            emit=lambda *args: emails.append(args)
+        )
+        rules = [
+            {"enabled": True, "channels": ["email"],
+             "email_recipient": "mail-only@example.test"},
+            {"enabled": True, "channels": ["windows", "email"],
+             "email_recipient": "both@example.test"},
+        ]
+
+        service._dispatch_notification_rules(rules, "Titre", "Message", 42)
+
+        self.assertEqual(windows, [("Titre", "Message", 42)])
+        self.assertEqual({item[2] for item in emails}, {
+            "mail-only@example.test", "both@example.test",
+        })
+
     def test_global_limit_warning_can_be_created_without_a_specific_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             service = MonitoringService.__new__(MonitoringService)
@@ -158,6 +182,119 @@ class MonitoringServiceSnapshotTest(unittest.TestCase):
             "Limite supprimée par charlie — Usage Guard",
         ])
 
+    def test_creating_a_second_limit_on_same_category_does_not_replace_first(self):
+        policies = {}
+        service = MonitoringService.__new__(MonitoringService)
+        service.usage = SimpleNamespace(data={"notification_rules": []})
+        service.notification_requested = SimpleNamespace(emit=lambda *args: None)
+
+        def apply_settings(target_key, settings):
+            policies[target_key] = dict(settings)
+            return policies[target_key]
+
+        service.app_limiter = SimpleNamespace(
+            policies=policies,
+            apply_settings=apply_settings,
+            label_for_key=lambda _key: "Catégorie · Jeux",
+        )
+        settings = {
+            "enabled": True, "create_new": True, "target_key": "category:Jeux",
+            "limit_seconds": 3600, "extension_seconds": 900,
+            "warning_seconds": 300,
+        }
+
+        service._apply_remote_command({
+            "action": "set_limit", "target_key": "category:Jeux",
+            "settings": settings,
+        })
+        service._apply_remote_command({
+            "action": "set_limit", "target_key": "category:Jeux",
+            "settings": {**settings, "limit_seconds": 600},
+        })
+
+        self.assertEqual(len(policies), 2)
+        self.assertIn("category:Jeux", policies)
+        duplicate_keys = [key for key in policies if key.startswith("category:Jeux#")]
+        self.assertEqual(len(duplicate_keys), 1)
+        self.assertEqual(policies["category:Jeux"]["limit_seconds"], 3600)
+        self.assertEqual(policies[duplicate_keys[0]]["target_key"], "category:Jeux")
+        self.assertEqual(policies[duplicate_keys[0]]["limit_seconds"], 600)
+
+    def test_remote_create_new_limit_is_idempotent_for_same_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policies = {}
+            service = MonitoringService.__new__(MonitoringService)
+            service.usage = AppUsageStore(Path(directory) / "activity.json")
+            service.notification_requested = SimpleNamespace(emit=lambda *args: None)
+
+            def apply_settings(target_key, settings):
+                policies[target_key] = dict(settings)
+                return policies[target_key]
+
+            service.app_limiter = SimpleNamespace(
+                policies=policies,
+                apply_settings=apply_settings,
+                label_for_key=lambda _key: "Catégorie · Jeux",
+            )
+            command = {
+                "_remote_command_id": "42",
+                "action": "set_limit",
+                "target_key": "category:Jeux",
+                "settings": {
+                    "enabled": True, "create_new": True,
+                    "target_key": "category:Jeux",
+                    "limit_seconds": 3600, "extension_seconds": 900,
+                    "warning_seconds": 300,
+                },
+            }
+
+            first = service._apply_remote_command(dict(command))
+            second = service._apply_remote_command(dict(command))
+
+            self.assertTrue(first["ok"])
+            self.assertEqual(first, second)
+            self.assertEqual(list(policies), ["category:Jeux"])
+            self.assertEqual(
+                service.usage.data["remote_command_results"]["42"]["limit"]["key"],
+                "category:Jeux",
+            )
+
+    def test_cached_remote_limit_command_is_reapplied_when_local_limit_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            policies = {}
+            service = MonitoringService.__new__(MonitoringService)
+            service.usage = AppUsageStore(Path(directory) / "activity.json")
+            service.notification_requested = SimpleNamespace(emit=lambda *args: None)
+
+            def apply_settings(target_key, settings):
+                policies[target_key] = dict(settings)
+                return policies[target_key]
+
+            service.app_limiter = SimpleNamespace(
+                policies=policies,
+                apply_settings=apply_settings,
+                label_for_key=lambda _key: "Codex",
+            )
+            service.usage.data["remote_command_results"]["42"] = {
+                "ok": True,
+                "limit": {
+                    "key": "app:codex",
+                    "target_key": "app:codex",
+                    "limit_seconds": 600,
+                },
+            }
+
+            result = service._apply_remote_command({
+                "_remote_command_id": "42",
+                "action": "set_limit",
+                "target_key": "app:codex",
+                "settings": {"target_key": "app:codex", "limit_seconds": 600},
+            })
+
+            self.assertTrue(result["ok"])
+            self.assertIn("app:codex", policies)
+            self.assertEqual(policies["app:codex"]["limit_seconds"], 600)
+
     def test_pwa_login_notification_names_the_connected_user(self):
         emitted = []
         service = MonitoringService.__new__(MonitoringService)
@@ -173,6 +310,46 @@ class MonitoringServiceSnapshotTest(unittest.TestCase):
         self.assertEqual(len(emitted), 1)
         self.assertIn("alice", emitted[0][0])
         self.assertIn("192.0.2.10", emitted[0][1])
+
+    def test_pwa_login_notification_can_be_sent_by_email_only(self):
+        emails = []
+        service = MonitoringService.__new__(MonitoringService)
+        service.usage = SimpleNamespace(data={"notification_rules": [{
+            "kind": "pwa_login", "enabled": True,
+            "channels": ["email"],
+            "email_recipient": "owner@example.test",
+        }]})
+        service.notification_requested = SimpleNamespace(
+            emit=lambda *_args: self.fail("Notification Windows inattendue")
+        )
+        service.email_notification_requested = SimpleNamespace(
+            emit=lambda *args: emails.append(args)
+        )
+
+        service._notify_pwa_login("alice", "192.0.2.10")
+
+        self.assertEqual(len(emails), 1)
+        self.assertEqual(emails[0][2], "owner@example.test")
+        self.assertIn("alice", emails[0][0])
+
+    def test_pwa_login_windows_only_does_not_repeat_server_email(self):
+        windows = []
+        service = MonitoringService.__new__(MonitoringService)
+        service.usage = SimpleNamespace(data={"notification_rules": [{
+            "kind": "pwa_login", "enabled": True,
+            "channels": ["windows", "email"],
+            "email_recipient": "owner@example.test",
+        }]})
+        service.notification_requested = SimpleNamespace(
+            emit=lambda *args: windows.append(args)
+        )
+        service.email_notification_requested = SimpleNamespace(
+            emit=lambda *_args: self.fail("E-mail déjà envoyé par le serveur")
+        )
+
+        service._notify_pwa_login("alice", "192.0.2.10", windows_only=True)
+
+        self.assertEqual(len(windows), 1)
 
     def test_custom_threshold_notifies_once_until_usage_drops_below_it(self):
         emitted = []
@@ -306,6 +483,39 @@ class MonitoringServiceSnapshotTest(unittest.TestCase):
             MonitoringService._session_identity(target),
             ("site:brave.exe:example.com", "example.com"),
         )
+
+    def test_private_browser_title_does_not_expose_a_site(self):
+        self.assertEqual(
+            _host_url_from_title("example.com - Fenêtre privée - Brave"),
+            "",
+        )
+
+    def test_private_browser_window_discards_a_stale_regular_url(self):
+        probe = ActivityProbe.__new__(ActivityProbe)
+        probe._fallback = SimpleNamespace(current=lambda: ActiveContext(
+            app_name="brave.exe",
+            window_title="Nouvel onglet - Fenêtre privée - Brave",
+            is_afk=False,
+        ))
+        probe._current_bridge_tab = lambda: SimpleNamespace(
+            url="https://example.test", title="Example",
+            audible=False, generic=False,
+        )
+        probe.aw = SimpleNamespace(current=lambda: ActiveContext(
+            app_name="brave.exe", url="https://example.test",
+        ))
+        probe._media = SimpleNamespace(
+            is_playing_for=lambda *_args: False,
+            playing_sources=lambda: [],
+        )
+        probe._last_browser_url = "https://previous.test"
+        probe._last_non_guard_context = None
+
+        result = probe.current()
+
+        self.assertTrue(result.generic_web)
+        self.assertEqual(result.url, "")
+        self.assertEqual(probe._last_browser_url, "https://previous.test")
 
     def test_context_keeps_windows_afk_state_instead_of_three_second_input_flag(self):
         probe = ActivityProbe.__new__(ActivityProbe)

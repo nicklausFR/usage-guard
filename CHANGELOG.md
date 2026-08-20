@@ -130,3 +130,29 @@
 15/08/2026 16:02 — v1.047 — Cibles non classées regroupées et blocage direct par période avec dates et heures, sans durée quotidienne.
 16/08/2026 13:05 — v1.048 — Plages horaires sur deux jours, retours en haut des listes et affichage renforcé des limitations temporelles dans le systray.
 16/08/2026 14:02 — v1.049 — Correction des résumés quotidiens et suppression de la barre artificielle dans le systray.
+20/08/2026 10:00 — v1.050 — Quantification locale du flux téléversé vers le serveur avec reset manuel et moyenne par minute.
+20/08/2026 10:30 — v1.051 — Limitation ponctuelle immédiate, joker minimal de cinq minutes et analyse centrée sur les jours.
+20/08/2026 11:00 — v1.052 — Workflow de blocage unifié par ponctuel ou permanent, durée ou date, et cible.
+20/08/2026 12:34 — v1.053 — Sessions du jour et limites distantes en attente.
+20/08/2026 13:09 — v1.054 — Correction creation distante des limitations.
+20/08/2026 13:15 — v1.055 — Correction snapshot live et purge anciennes synchronisations.
+20/08/2026 13:22 — v1.056 — Purge visuelle des anciennes synchronisations en attente.
+20/08/2026 13:26 — v1.057 — Correction synchronisation limitation tout ordinateur.
+20/08/2026 13:40 — v1.058 — Correction recuperation des commandes distantes par le PC.
+20/08/2026 13:45 — v1.059 — Correction cibles analyse PWA distante.
+20/08/2026 14:00 — v1.060 — Synchronisation durable des limitations stockées sur le serveur vers le PC.
+20/08/2026 14:10 — v1.061 — Relivraison des limitations acquittées mais absentes du PC et publication complète de l’analyse distante.
+20/08/2026 14:20 — v1.062 — Relivraison des limitations absentes du PC et analyse distante complète.
+20/08/2026 14:30 — v1.063 — Purge des anciennes synchronisations et analyse distante depuis le store d’activité.
+20/08/2026 15:05 — v1.064 — Purge serveur réelle des commandes de limite obsolètes et reconstruction stricte de l’analyse distante.
+20/08/2026 15:25 — v1.065 — Purge automatique au démarrage des commandes distantes déjà récupérées ou acquittées.
+20/08/2026 15:35 — v1.066 — Purge des commandes anciennes même si elles viennent d’être reacquittées.
+20/08/2026 16:07 — v1.067 — Synchronisation des limites et reconstruction de l’analyse distante depuis l’activité.
+20/08/2026 16:15 — v1.068 — Actualisation automatique des limites et notification lors d’un quota déjà dépassé.
+20/08/2026 16:50 — v1.069 — Navigation web générique et chronologie masquée lors du repli.
+20/08/2026 17:10 — v1.070 — Notifications par e-mail configurables, chiffrées et test manuel.
+20/08/2026 17:50 — v1.071 — Configuration SMTP dans les paramètres et canaux Windows ou e-mail par notification.
+20/08/2026 18:27 — v1.072 — Notifications de connexion et déconnexion du client.
+20/08/2026 18:37 — v1.073 — Notifications isolées par utilisateur.
+20/08/2026 19:00 — v1.074 — Analyse des horaires et durées d'utilisation du PC.
+20/08/2026 19:03 — v1.075 — Analyse des horaires du PC, notifications par utilisateur et synchronisation distante fiabilisée.

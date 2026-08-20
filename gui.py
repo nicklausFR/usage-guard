@@ -102,13 +102,19 @@ class TrayProgressCard(QWidget):
                 continue
             status = self.service.app_limiter.current_status(key)
             temporal = bool(policy.get("block_during_validity"))
+            configured_schedule = bool(
+                policy.get("schedule_start") and policy.get("schedule_end")
+            )
             if not status.get("schedule_active", True) and not (
                 temporal and status.get("schedule_pending")
+            ) and not (
+                configured_schedule and not policy.get("valid_until")
             ):
                 continue
             entries.append({
                 "label": self.service.app_limiter.label_for_key(key),
                 "temporal": temporal,
+                "configured_schedule": configured_schedule,
                 "policy": policy,
                 **status,
             })
@@ -225,6 +231,18 @@ class TrayProgressCard(QWidget):
                     bool(entry.get("schedule_active")), bool(entry.get("schedule_pending")),
                 )
                 continue
+            policy = entry.get("policy", {})
+            if (
+                entry.get("configured_schedule")
+                and not entry.get("schedule_active")
+                and not entry.get("schedule_pending")
+            ):
+                add_temporal_row(
+                    entry["label"], None, None,
+                    f"{policy['schedule_start']}–{policy['schedule_end']}",
+                    False, False, show_progress=False,
+                )
+                continue
             row = QWidget()
             row_layout = QVBoxLayout(row)
             row_layout.setContentsMargins(0, 4, 0, 0)
@@ -234,17 +252,22 @@ class TrayProgressCard(QWidget):
             name.setObjectName("limitName")
             remaining = QLabel(_("reste {duration}").format(duration=_compact_duration(entry['remaining'])))
             remaining.setObjectName("limitTime")
+            allowed_seconds = max(1, int(round(float(entry["allowed"]))))
+            low_remaining = float(entry.get("remaining", allowed_seconds)) / max(1.0, float(entry["allowed"])) <= .1
+            warning_color = bool(entry.get("extension_used")) or low_remaining
+            if warning_color:
+                remaining.setStyleSheet("color:#f59e0b; font-weight:700;")
             heading.addWidget(name, 1)
             heading.addWidget(remaining)
             progress = QProgressBar()
-            allowed_seconds = max(1, int(round(float(entry["allowed"]))))
             progress.setRange(0, allowed_seconds)
             progress.setValue(min(allowed_seconds, int(round(float(entry["seconds"])))))
             progress.setTextVisible(False)
+            if warning_color:
+                progress.setStyleSheet("QProgressBar::chunk { background:#f59e0b; }")
             detail_parts = [
                 f"{_compact_duration(entry['seconds'])} / {_compact_duration(entry['allowed'])}"
             ]
-            policy = entry.get("policy", {})
             if policy.get("schedule_start") and policy.get("schedule_end"):
                 detail_parts.append(
                     f"{policy['schedule_start']}–{policy['schedule_end']}"
@@ -647,12 +670,12 @@ class LimitsTree(QTreeWidget):
             event.ignore()
 
 
-def create_usage_icon(active=False):
+def create_usage_icon(active=False, alert=False):
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    painter.setBrush(QColor("#27d17f" if active else "#00aaff"))
+    painter.setBrush(QColor("#f59e0b" if alert else "#27d17f" if active else "#00aaff"))
     painter.setPen(Qt.NoPen)
     painter.drawRoundedRect(10, 8, 44, 48, 10, 10)
     painter.setBrush(QColor(45, 45, 45))
@@ -719,6 +742,20 @@ def create_tray_icon(toggle_callback, service):
     icon._open_action = open_action
     icon._quit_action = quit_action
     icon._handle_activation = handle_activation
+    icon._normal_icon = usage_icon
+    icon._alert_icon = create_usage_icon(active=True, alert=True)
+    icon._alert_blank_icon = create_usage_icon(active=False)
+    icon._alert_visible = False
+
+    def has_duration_limit_alert():
+        for item in service.app_limiter.running_limits():
+            if item.get("block_during_validity"):
+                continue
+            allowed = max(1.0, float(item.get("allowed", 0) or 0))
+            remaining = float(item.get("remaining", allowed) or 0)
+            if allowed > 0 and remaining / allowed <= .1:
+                return True
+        return False
 
     def update_tooltip():
         def compact_duration(seconds):
@@ -760,6 +797,22 @@ def create_tray_icon(toggle_callback, service):
     update_tooltip()
     icon.show()
 
+    blink_timer = QTimer(icon)
+    blink_timer.setInterval(650)
+
+    def update_blink():
+        alert = has_duration_limit_alert()
+        if not alert:
+            icon._alert_visible = False
+            icon.setIcon(icon._normal_icon)
+            return
+        icon._alert_visible = not icon._alert_visible
+        icon.setIcon(icon._alert_icon if icon._alert_visible else icon._alert_blank_icon)
+
+    blink_timer.timeout.connect(update_blink)
+    service.state_changed.connect(update_blink)
+    blink_timer.start()
+
     hover_timer = QTimer(icon)
     hover_timer.setInterval(180)
     hover_state = {"over": False}
@@ -782,6 +835,8 @@ def create_tray_icon(toggle_callback, service):
     hover_timer.start()
     icon._progress_card = progress_card
     icon._hover_timer = hover_timer
+    icon._blink_timer = blink_timer
+    icon._update_blink = update_blink
     icon._check_hover = check_hover
 
     def promote_in_windows_settings():

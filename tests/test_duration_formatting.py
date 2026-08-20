@@ -17,6 +17,67 @@ from gui import TrayProgressCard, _compact_duration, _format_seconds
 
 
 class DurationFormattingTest(unittest.TestCase):
+    def test_joker_notification_is_emitted_once_after_normal_limit(self):
+        emitted = []
+        limiter = AppLimiter.__new__(AppLimiter)
+        policy = {
+            "enabled": True, "block_during_validity": False,
+            "limit_seconds": 60, "extension_seconds": 15,
+        }
+        state = {"seconds": 60, "extension_used": True}
+        limiter.policies = {"app:test": policy}
+        limiter.usage = SimpleNamespace(
+            data={"notification_rules": [{
+                "kind": "limit_extension", "enabled": True,
+                "channels": ["windows"],
+            }]},
+            app_limit_state_for_day=lambda _key: dict(state),
+            add_app_limit_seconds=lambda *_args: {
+                "seconds": 61, "extension_used": True,
+            },
+        )
+        limiter.current_status = lambda _key: {
+            "schedule_active": True, "time_blocked": False,
+        }
+        limiter.notification_requested = SimpleNamespace(
+            emit=lambda *args: emitted.append(args)
+        )
+        limiter._notified_handles = {("app:test", 42)}
+        limiter._warning_shown = set()
+        limiter._playing_seen_at = {}
+        limiter.block_target = lambda: None
+
+        limiter._consume_limit("app:test", "Test", 10, 42, 1)
+        limiter._consume_limit("app:test", "Test", 10, 42, 1)
+
+        self.assertEqual(len(emitted), 1)
+        self.assertIn("joker utilisé", emitted[0][0])
+        self.assertIn("15 s", emitted[0][1])
+
+    def test_limiter_notification_can_use_email_without_windows(self):
+        windows = []
+        emails = []
+        limiter = AppLimiter.__new__(AppLimiter)
+        limiter.usage = SimpleNamespace(data={"notification_rules": [{
+            "kind": "limit_warning", "enabled": True,
+            "channels": ["email"], "email_recipient": "owner@example.test",
+        }]})
+        limiter.notification_requested = SimpleNamespace(
+            emit=lambda *args: windows.append(args)
+        )
+        limiter.email_notification_requested = SimpleNamespace(
+            emit=lambda *args: emails.append(args)
+        )
+
+        limiter._emit_notification(
+            "limit_warning", "app:test", "Préavis", "Cinq minutes", 7
+        )
+
+        self.assertEqual(windows, [])
+        self.assertEqual(
+            emails, [("Préavis", "Cinq minutes", "owner@example.test")]
+        )
+
     def test_seconds_are_kept_when_hours_are_present(self):
         expected = "1 h 01 min 01 s"
         self.assertEqual(_compact_duration(3661), expected)
@@ -28,6 +89,39 @@ class DurationFormattingTest(unittest.TestCase):
         self.assertEqual(_compact_duration(125), expected)
         self.assertEqual(_format_seconds(125), expected)
         self.assertEqual(AppLimiter._format_duration(125), expected)
+
+    def test_already_exceeded_limit_notifies_before_immediate_block(self):
+        emitted = []
+        blocked = []
+        limiter = AppLimiter.__new__(AppLimiter)
+        limiter.policies = {"app:test": {
+            "enabled": True, "block_during_validity": False,
+            "limit_seconds": 60, "extension_seconds": 15,
+        }}
+        limiter.usage = SimpleNamespace(
+            data={"notification_rules": [{
+                "kind": "limit_warning", "enabled": True, "target_key": "",
+            }]},
+            app_limit_state_for_day=lambda _key: {
+                "seconds": 90, "extension_used": False,
+            },
+        )
+        limiter.current_status = lambda _key: {
+            "schedule_active": True, "time_blocked": False,
+        }
+        limiter.notification_requested = SimpleNamespace(
+            emit=lambda *args: emitted.append(args)
+        )
+        limiter._notified_handles = {("app:test", 42)}
+        limiter._warning_shown = set()
+        limiter._playing_seen_at = {}
+        limiter.block_target = lambda: blocked.append(True)
+
+        limiter._consume_limit("app:test", "Test", 10, 42, 1)
+
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(len(emitted), 1)
+        self.assertIn("limite atteinte", emitted[0][0])
 
     def test_computer_warning_is_immediate_inside_configured_notice(self):
         now = datetime.now().astimezone()
@@ -92,6 +186,29 @@ class DurationFormattingTest(unittest.TestCase):
         self.assertEqual(after_midnight["daily_end"], "02:00")
         self.assertFalse(outside["active"])
         self.assertTrue(outside["pending"])
+
+    def test_daily_duration_computer_block_activates_after_quota(self):
+        limiter = AppLimiter.__new__(AppLimiter)
+        usage = SimpleNamespace(data={"computer_block": {
+            "enabled": True, "mode": "daily_duration",
+            "limit_seconds": 3600,
+            "valid_from": "", "valid_from_time": "",
+            "valid_until": "", "valid_until_time": "",
+            "schedule_start": "", "schedule_end": "",
+        }})
+        usage.system_usage_for_day = lambda _day: {"on": usage.on_seconds}
+        limiter.usage = usage
+
+        now = datetime.fromisoformat("2026-08-20T12:00:00+02:00")
+        usage.on_seconds = 3599
+        before = limiter.computer_block_status(now)
+        usage.on_seconds = 3600
+        after = limiter.computer_block_status(now)
+
+        self.assertFalse(before["active"])
+        self.assertTrue(before["pending"])
+        self.assertTrue(after["active"])
+        self.assertEqual(after["allowed"], 3600)
 
     def test_application_schedule_crosses_midnight(self):
         policy = {"schedule_start": "23:00", "schedule_end": "02:00"}
@@ -254,6 +371,36 @@ class TrayProgressCardTest(unittest.TestCase):
         labels = [label.text() for label in card.findChildren(QLabel)]
         self.assertTrue(any("14:00" in text and "18:00" in text for text in labels))
 
+    def test_configured_application_hourly_limit_stays_visible_outside_time_range(self):
+        limiter = SimpleNamespace(
+            policies={"app:test": {
+                "enabled": True,
+                "limit_seconds": 3600,
+                "extension_seconds": 900,
+                "warning_seconds": 300,
+                "schedule_start": "14:00",
+                "schedule_end": "18:00",
+            }},
+            current_status=lambda _key: {
+                "seconds": 0, "allowed": 3600, "remaining": 3600,
+                "schedule_active": False, "schedule_pending": False,
+            },
+            label_for_key=lambda _key: "Application test",
+            computer_block_status=lambda: {},
+        )
+        usage = SimpleNamespace(
+            usage_for_day=lambda: {}, presentation=lambda _usage: [],
+        )
+        card = TrayProgressCard(SimpleNamespace(app_limiter=limiter, usage=usage))
+
+        card.refresh()
+
+        self.assertTrue(card.empty_state.isHidden())
+        labels = [label.text() for label in card.findChildren(QLabel)]
+        self.assertIn("Application test", labels)
+        self.assertTrue(any("14:00" in text and "18:00" in text for text in labels))
+        self.assertEqual(card.findChildren(QProgressBar), [])
+
     def test_temporal_application_limit_uses_the_same_progress_layout(self):
         limiter = SimpleNamespace(
             policies={"app:test": {
@@ -279,6 +426,15 @@ class TrayProgressCardTest(unittest.TestCase):
         self.assertIn("Application test", labels)
         self.assertTrue(any("16/08/2026 10:00" in text for text in labels))
         self.assertEqual(len(card.findChildren(QProgressBar)), 1)
+
+    def test_tray_icon_blinks_for_low_duration_limits_only(self):
+        script = (Path(__file__).parents[1] / "gui.py").read_text(encoding="utf-8")
+
+        self.assertIn("def has_duration_limit_alert", script)
+        self.assertIn('item.get("block_during_validity")', script)
+        self.assertIn("remaining / allowed <= .1", script)
+        self.assertIn("icon._alert_icon", script)
+        self.assertIn("blink_timer.start()", script)
 
 
 if __name__ == "__main__":

@@ -59,20 +59,34 @@ class PwaDialogTest(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn('min ${String(s).padStart(2,"0")} s', script)
-        self.assertIn('$("#today").classList.contains("active"))load("scope=session",{live:true})', script)
+        self.assertIn('$("#today").classList.contains("active")||$("#limits").classList.contains("active"))load("scope=today",{live:true})', script)
         self.assertIn('$("#analysis").classList.contains("active"))refreshAnalysisActivity()', script)
         self.assertIn("function refreshTreeValues", script)
-        self.assertIn('if(!live)renderRunTimeline(data,"#today-sessions")', script)
+        self.assertIn('if(!live)renderRunTimeline(view,"#today-sessions")', script)
         self.assertIn("analysisHistory={...analysisHistory", script)
         self.assertNotIn("renderSelectedAnalysis({...analysisHistory,current:latest.current", script)
+        self.assertIn("selectedTodaySessionKey", script)
 
     def test_today_timeline_uses_usage_guard_start_as_zero(self):
+        markup = (Path(__file__).parents[1] / "pwa" / "index.html").read_text(
+            encoding="utf-8"
+        )
         script = (Path(__file__).parents[1] / "pwa" / "app.js").read_text(
             encoding="utf-8"
         )
         self.assertIn("function renderRunTimeline", script)
         self.assertIn("Usage Guard démarre", script)
         self.assertIn("présent à 0 s", script)
+        self.assertIn("absence-share", markup)
+
+        self.assertIn("session-total-legend", markup)
+        self.assertIn('id="active-share"></i>', markup)
+        self.assertIn('$("#absence-share").title', script)
+        self.assertIn("absenceWidth", script)
+        self.assertIn("Absence d’activité / hors ligne", script)
+        self.assertIn("run-absence", script)
+        self.assertIn('timeline-legend"><span><i class="open"', script)
+        self.assertIn('class="absence"', script)
         self.assertIn('data-tree-item="${timelineItemData(item)}"', script)
         self.assertIn("Ouvert, non actif", script)
         self.assertIn("Usage actif comptabilisé", script)
@@ -80,6 +94,13 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn(
             ".filter(group=>activeKeys.has(group.item.key))", script
         )
+
+    def test_collapsed_branch_hides_its_inline_timeline(self):
+        script = (Path(__file__).parents[1] / "pwa" / "app.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("inline=selected&&(!branch||!closed)?", script)
 
     def test_settings_tab_exposes_language_choice(self):
         root = Path(__file__).parents[1] / "pwa"
@@ -96,12 +117,68 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn('value="dark"', markup)
         self.assertIn('value="light"', markup)
         self.assertIn('usage-guard-theme', script)
+        self.assertIn('id="color-progress"', markup)
+        self.assertIn('id="color-absence"', markup)
+        self.assertIn('id="color-inactive"', markup)
+        self.assertIn('id="color-warning"', markup)
+        self.assertIn('usage-guard-ui-colors', script)
+        self.assertIn('function applyUiColors', script)
+        self.assertIn("--progress-color", style)
+        self.assertIn("--absence-color", style)
+        self.assertIn("--inactive-color", style)
+        self.assertIn("--warning-color", style)
+
+    def test_email_configuration_is_in_settings_and_recipient_is_per_rule(self):
+        root = Path(__file__).parents[1] / "pwa"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+
+        notifications = markup[markup.index('<section id="notifications"'):markup.index('<section id="settings"')]
+        settings = markup[markup.index('<section id="settings"'):]
+        self.assertNotIn('id="email-settings-form"', notifications)
+        self.assertIn('id="notification-delivery-form"', notifications)
+        self.assertIn('value="windows"', notifications)
+        self.assertIn('value="email"', notifications)
+        self.assertIn('value="both"', notifications)
+        self.assertIn('name="email_recipient"', notifications)
+        self.assertIn('id="email-settings-form"', settings)
+        self.assertNotIn('id="email-enabled"', settings)
+        self.assertNotIn('name="enabled"', settings)
+        self.assertIn('id="test-email-settings"', settings)
+        self.assertIn('name="smtp_host"', settings)
+        smtp_form = settings[settings.index('id="email-settings-form"'):settings.index('</form>')]
+        self.assertNotIn('name="recipient"', smtp_form)
+        self.assertIn('function testEmailSettings(recipient)', script)
+        self.assertIn('$("#test-email-settings").onclick', script)
+        self.assertIn('channels:[...(current?.channels||["windows"])]', script)
+
+    def test_client_connection_notification_choices_are_available(self):
+        markup = (Path(__file__).parents[1] / "pwa" / "index.html").read_text(encoding="utf-8")
+        script = (Path(__file__).parents[1] / "pwa" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-notification-type="client_connected"', markup)
+        self.assertIn('data-notification-type="client_disconnected"', markup)
+        self.assertIn('"client_connected","client_disconnected"', script)
+
+    def test_analysis_exposes_daily_pc_session_hours(self):
+        root = Path(__file__).parents[1] / "pwa"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+        self.assertIn('data-analysis-type="hours"', markup)
+        self.assertIn('id="analysis-hours-summary"', markup)
+        self.assertIn('id="analysis-hours-list"', markup)
+        self.assertIn("function sessionHoursDays", script)
+        self.assertIn("function renderSessionHours", script)
 
     def test_session_summary_is_one_stacked_bar_and_admin_is_manageable_locally(self):
         root = Path(__file__).parents[1] / "pwa"
         markup = (root / "index.html").read_text(encoding="utf-8")
         script = (root / "app.js").read_text(encoding="utf-8")
         self.assertEqual(markup.count('class="session-total-track"'), 1)
+        self.assertIn('id="today-session-date"', markup)
+        self.assertIn('id="today-session-list"', markup)
+        self.assertIn("function renderTodaySessionPicker", script)
+        self.assertIn("function dataForTodaySession", script)
+        self.assertIn('data-today-session', script)
         self.assertNotIn('class="session-measure', markup)
         self.assertIn('id="today-date" hidden', markup)
         self.assertIn('class="session-summary-head"', markup)
@@ -111,6 +188,20 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn('data-manage-user=', script)
         self.assertIn('/access`', script)
         self.assertIn('Chronologie ·', script)
+
+    def test_pending_limit_commands_are_displayed_until_sync(self):
+        script = (Path(__file__).parents[1] / "pwa" / "app.js").read_text(
+            encoding="utf-8"
+        )
+        style = (Path(__file__).parents[1] / "pwa" / "style.css").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("pending_limit_commands", script)
+        self.assertIn("En attente de récupération par le PC", script)
+        self.assertIn("Récupérée par le PC", script)
+        self.assertNotIn("10 * 60 * 1000", script)
+        self.assertIn("pending-sync", style)
 
     def test_analysis_requires_explicit_session_and_classification(self):
         root = Path(__file__).parents[1] / "pwa"
@@ -135,6 +226,10 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn('id="analysis-stats-summary"', markup)
         self.assertIn('id="analysis-stats-chart"', markup)
         self.assertIn("function buildStatsChoices", script)
+        self.assertIn("function computerStatsChoice", script)
+        self.assertIn("function statsChoiceAt", script)
+        self.assertIn('targetKey==="computer:all"?-1', script)
+        self.assertNotIn('return [{kind:"computer",key:"computer:all",label:"Tout l’ordinateur"', script)
         self.assertIn("function categoryLineage", script)
         self.assertIn("data.top_level_categories||[]", script)
         self.assertIn("categoryLineage(analysisHistory||{},category)", script)
@@ -165,7 +260,7 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn('id="general-settings-section"', markup)
         self.assertIn('id="users-settings-section"', markup)
         self.assertIn('id="defaults-settings-section"', markup)
-        self.assertIn('$("#general-settings-section").hidden=remoteMode', script)
+        self.assertIn('$("#general-settings-section").hidden=false', script)
         self.assertIn('$("#users-settings-section").hidden=remoteMode&&!isRemoteAdmin', script)
         self.assertIn('$("#defaults-settings-section").hidden=remoteMode', script)
         self.assertIn('$("#remote-account").hidden=!isRemoteAdmin', script)
@@ -177,6 +272,10 @@ class PwaDialogTest(unittest.TestCase):
 
         self.assertIn('web:item.web||String(item.key||"").startsWith("site:")', script)
         self.assertIn('<span class="web-badge">Web</span>', script)
+        self.assertIn("function displayLabel", script)
+        self.assertIn('value.startsWith("site:")', script)
+        self.assertIn('return host||raw||value', script)
+        self.assertIn('label:"Sites"', script)
         self.assertIn(".web-badge", style)
 
     def test_live_activity_highlight_does_not_pulse(self):
@@ -243,6 +342,7 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn('id="notifications-list"', markup)
         for kind in (
             "limited_app_start", "limit_change", "limit_warning",
+            "limit_extension",
             "computer_block_change",
             "pwa_login", "usage_threshold",
         ):
@@ -259,11 +359,46 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn('startTargetSelector("limit")', script)
         self.assertIn('function targetHierarchy()', script)
         self.assertIn('data-target-select="computer:all"', script)
-        self.assertIn('Choisir toute cette catégorie', script)
+        self.assertIn('Catégories / applications / sites', script)
         self.assertIn('key.endsWith(":other-sites")', script)
-        self.assertIn('Ouvrir les sites et leurs catégories', script)
-        self.assertIn('data-limit-validity="permanent"', markup)
-        self.assertIn('data-limit-validity="period"', markup)
+        self.assertIn('Rechercher et choisir une cible précise', script)
+        self.assertIn('data-limit-basis="duration"', script)
+        self.assertIn('data-limit-basis="date"', script)
+        self.assertIn('data-limit-periodicity="one-time"', script)
+        self.assertIn('data-limit-periodicity="permanent"', script)
+        self.assertIn('<strong>Ponctuelle</strong>', script)
+        self.assertIn('<strong>Permanente</strong>', script)
+        self.assertIn('<strong>Durée</strong>', script)
+        self.assertIn('<strong>Créneau date/heure</strong>', script)
+        self.assertIn('<strong>Tout l’ordinateur</strong><small>Cible globale</small>', script)
+        self.assertIn('<strong>Catégories / applications / sites</strong><small>Rechercher et choisir une cible précise</small>', script)
+        self.assertIn('function rootCategoryTags', script)
+        self.assertIn('class="target-tags"', script)
+        self.assertIn('class="target-entry"', script)
+        self.assertIn('class="target-scroll-list"', script)
+        self.assertIn('data-target-search', script)
+        self.assertIn("function targetSearchScore", script)
+        self.assertIn("label.startsWith(query)", script)
+        self.assertIn("meta.includes(query)", script)
+        self.assertNotIn("Blocage ponctuel · durée", script)
+        self.assertNotIn("Blocage ponctuel · date", script)
+        self.assertNotIn("Blocage permanent · durée", script)
+        self.assertNotIn("Blocage permanent · date", script)
+        self.assertIn('id="computer-duration-form"', markup)
+        self.assertIn('mode:"duration"', script)
+        self.assertIn('delay_seconds:0', script)
+        self.assertIn('mode:"daily_duration"', script)
+        self.assertIn('mode:"absolute_range"', script)
+        self.assertIn('saveTimedTargetDurationLimit', script)
+        self.assertIn("create_new:!limitDraft.editing", script)
+        self.assertIn("target_key:limitDraft.editing?limitDraft.limit_key:limitDraft.target_key", script)
+        self.assertIn("const limitKey=item.key||item.target_key", script)
+        self.assertIn("function isLimitTimeAlert", script)
+        self.assertIn("limit-alert", script)
+        self.assertIn("Temps additionnel actif", script)
+        self.assertIn(".bar.warning i", style)
+        self.assertIn("@keyframes limitPulse", style)
+        self.assertNotIn('data-limit-validity="period"', markup)
         self.assertIn('id="limit-valid-from"', markup)
         self.assertIn('id="limit-valid-from-time"', markup)
         self.assertIn('id="limit-valid-until"', markup)
@@ -297,6 +432,7 @@ class PwaDialogTest(unittest.TestCase):
         self.assertIn('data-notification-warning-group-remove', script)
         self.assertIn('updateNotificationWarningGroup', script)
         self.assertIn('showNotificationWarningManager()', script)
+        self.assertIn('Le joker doit durer au moins 5 min', script)
 
     def test_secondary_tab_actions_are_progressive_and_stay_at_the_top(self):
         root = Path(__file__).parents[1] / "pwa"
@@ -309,7 +445,11 @@ class PwaDialogTest(unittest.TestCase):
         self.assertLess(analysis_action, history)
         self.assertIn('id="analysis-stats-panel" class="analysis-section stats-section progressive-panel" hidden', markup)
         self.assertIn('id="analysis-timeline-panel" class="analysis-section progressive-panel" hidden', markup)
+        self.assertIn('<strong>Par jour</strong>', markup)
+        self.assertNotIn('data-analysis-type="timeline"', markup)
+        self.assertNotIn('<strong>Session Windows</strong><small>Frise chronologique détaillée</small>', markup)
         self.assertIn('id="new-limit" class="primary"', markup)
+        self.assertIn('id="limit-type-menu" class="choice-list analysis-choice-list" hidden', markup)
         self.assertNotIn('id="new-computer-block"', markup)
         self.assertIn('id="limit-workflow"', markup)
         self.assertIn('id="notification-workflow"', markup)
@@ -360,9 +500,10 @@ class PwaDialogTest(unittest.TestCase):
         script = (root / "app.js").read_text(encoding="utf-8")
 
         self.assertIn("Tout l’ordinateur", script)
-        self.assertIn("Choisir dans l’arborescence", script)
-        self.assertIn("Limite quotidienne permanente", markup)
-        self.assertIn("Blocage par période", markup)
+        self.assertIn("Catégories / applications / sites", script)
+        self.assertIn("Permanente", script)
+        self.assertIn("Quota quotidien avant blocage", script)
+        self.assertIn("Créneau horaire récurrent", script)
         self.assertIn("Heure de début", markup)
         self.assertIn("Heure de fin", markup)
         self.assertNotIn('id="computer-block-duration"', markup)
@@ -391,10 +532,18 @@ class PwaDialogTest(unittest.TestCase):
 
         analysis_menu = markup.split('id="analysis-type-menu"', 1)[1].split("</div>", 1)[0]
         self.assertLess(analysis_menu.index("choice-back"), analysis_menu.index("data-analysis-type"))
-        limit_menu = markup.split('id="limit-validity-menu"', 1)[1].split("</div>", 1)[0]
-        self.assertLess(limit_menu.index("choice-back"), limit_menu.index("data-limit-validity"))
+        self.assertIn("function limitPeriodicityChoices", script)
+        self.assertIn("data-limit-basis", script)
+        self.assertIn("startTargetSelector(\"analysis\")", script)
+        self.assertIn("...(data.categories||[])", script)
+        self.assertIn("data.daily_stats?.length?data.daily_stats:[{usage:data.usage||[]}]", script)
+        self.assertIn("if(!analysisHistory)await loadAnalysis()", script)
+        self.assertIn("startLimitForKnownTarget", script)
+        self.assertIn('activateTab("limits")', script)
         self.assertIn('innerHTML=`<button class="choice-back" data-target-tree-back>', script)
         self.assertIn(".choice-list .choice-back", style)
+        self.assertIn(".workflow-input-form button[data-limit-back]", style)
+        self.assertIn("order: -1", style)
         self.assertIn('id="limit-schedule-end"', markup)
         self.assertIn('valid_from:limitDraft.valid_from', script)
         self.assertIn('valid_until:limitDraft.valid_until', script)

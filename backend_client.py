@@ -2,6 +2,9 @@
 import json
 import os
 import threading
+import time
+from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode, urlparse
@@ -101,6 +104,12 @@ class BackendClient:
         self._thread = None
         self._last_activity = None
         self._last_snapshot = None
+        self._traffic_lock = threading.Lock()
+        self._traffic_reset_at = time.time()
+        self._uploaded_bytes = 0
+        self._last_upload_at = None
+        self._email_lock = threading.Lock()
+        self._pending_email_notifications = deque(maxlen=100)
 
     @property
     def configured(self):
@@ -127,17 +136,27 @@ class BackendClient:
             try:
                 self._sync()
             except Exception as error:
-                debug_log(f"backend sync failed: {type(error).__name__}")
+                detail = f" HTTP {error.code}" if isinstance(error, HTTPError) else ""
+                debug_log(f"backend sync failed: {type(error).__name__}{detail}")
             self._stop.wait(self.poll_seconds)
 
     def _sync(self):
-        self._publish_state()
+        publish_error = None
+        try:
+            self._publish_state()
+        except Exception as error:
+            publish_error = error
+            detail = f" HTTP {error.code}" if isinstance(error, HTTPError) else ""
+            debug_log(f"backend publish failed before commands: {type(error).__name__}{detail}")
         response = self._request(
             "GET", "/api/v1/agent/commands?" + urlencode({"device_id": self.device_id})
         )
         changed = False
         for command in response.get("commands", []):
             command_id = str(command.pop("id", ""))
+            if command_id:
+                command["_remote_command_id"] = command_id
+            debug_log(f"backend command received: id={command_id or '-'} action={command.get('action', '-')}")
             result = self.command_handler(command)
             changed = changed or bool(result.get("ok"))
             if command_id:
@@ -145,48 +164,58 @@ class BackendClient:
                     "device_id": self.device_id, "result": result,
                 })
         if changed:
-            self._publish_state()
+            try:
+                self._publish_state()
+            except Exception as error:
+                detail = f" HTTP {error.code}" if isinstance(error, HTTPError) else ""
+                debug_log(f"backend publish failed after commands: {type(error).__name__}{detail}")
+        elif publish_error:
+            self._flush_email_notifications()
+            return
+        self._flush_email_notifications()
 
     def _publish_state(self):
+        activity_error = None
         if self.activity_provider:
-            local = self.activity_provider()
+            try:
+                local = self.activity_provider()
 
-            if self._last_activity is None:
-                remote = self._request(
-                    "GET",
-                    "/api/v1/agent/activity?"
-                    + urlencode({"device_id": self.device_id}),
+                if self._last_activity is None:
+                    remote = self._request(
+                        "GET",
+                        "/api/v1/agent/activity?"
+                        + urlencode({"device_id": self.device_id}),
+                    )
+                    if (
+                        remote.get("activity")
+                        and not local.get("days")
+                        and self.activity_importer
+                    ):
+                        self.activity_importer(remote["activity"])
+                        local = self.activity_provider()
+
+                    if remote.get("activity"):
+                        self._last_activity = remote["activity"]
+
+                self._last_activity = self._publish_document(
+                    "/api/v1/agent/activity",
+                    "activity",
+                    self._last_activity,
+                    local,
                 )
-                if (
-                    remote.get("activity")
-                    and not local.get("days")
-                    and self.activity_importer
-                ):
-                    self.activity_importer(remote["activity"])
-                    local = self.activity_provider()
-
-                if remote.get("activity"):
-                    self._last_activity = remote["activity"]
-
-            self._last_activity = self._publish_document(
-                "/api/v1/agent/activity",
-                "activity",
-                self._last_activity,
-                local,
-            )
+            except Exception as error:
+                activity_error = error
 
         snapshot = self.snapshot_provider()
         if "error" not in snapshot:
-            analysis = self.snapshot_provider({"scope": "all"})
-            if "error" not in analysis:
-                snapshot["analysis"] = analysis
-
             self._last_snapshot = self._publish_document(
                 "/api/v1/agent/snapshot",
                 "snapshot",
                 self._last_snapshot,
                 snapshot,
             )
+        if activity_error:
+            raise activity_error
 
     def _publish_document(self, path, field, previous, current):
         if previous is None:
@@ -256,4 +285,75 @@ class BackendClient:
         )
         with urlopen(request, timeout=60) as response:  # nosec B310
             content = response.read().decode("utf-8")
+        if body:
+            self._record_uploaded_bytes(len(body))
         return json.loads(content) if content else {}
+
+    def email_settings(self):
+        return self._request(
+            "GET", "/api/v1/agent/email/settings?" + urlencode({"device_id": self.device_id})
+        )
+
+    def save_email_settings(self, settings):
+        return self._request("POST", "/api/v1/agent/email/settings", {
+            "device_id": self.device_id, "settings": dict(settings or {}),
+        })
+
+    def test_email_settings(self, recipient):
+        return self._request("POST", "/api/v1/agent/email/test", {
+            "device_id": self.device_id, "recipient": str(recipient or "").strip(),
+        })
+
+    def queue_email_notification(self, title, message, recipient):
+        with self._email_lock:
+            self._pending_email_notifications.append({
+                "title": str(title or "Notification"),
+                "message": str(message or ""),
+                "recipient": str(recipient or "").strip(),
+            })
+
+    def _flush_email_notifications(self):
+        while True:
+            with self._email_lock:
+                if not self._pending_email_notifications:
+                    return
+                notification = self._pending_email_notifications[0]
+            self._request("POST", "/api/v1/agent/email/send", {
+                "device_id": self.device_id,
+                **notification,
+            })
+            with self._email_lock:
+                if self._pending_email_notifications and self._pending_email_notifications[0] is notification:
+                    self._pending_email_notifications.popleft()
+
+    def _record_uploaded_bytes(self, byte_count):
+        now = time.time()
+        with self._traffic_lock:
+            self._uploaded_bytes += max(0, int(byte_count or 0))
+            self._last_upload_at = now
+
+    def traffic_stats(self):
+        with self._traffic_lock:
+            reset_at = self._traffic_reset_at
+            uploaded = self._uploaded_bytes
+            last_upload_at = self._last_upload_at
+        elapsed = max(0.0, time.time() - reset_at)
+        return {
+            "enabled": self.enabled,
+            "configured": self.configured,
+            "uploaded_bytes": uploaded,
+            "elapsed_seconds": elapsed,
+            "upload_rate_bytes_per_minute": uploaded / (elapsed / 60) if elapsed else 0.0,
+            "reset_at": datetime.fromtimestamp(reset_at, timezone.utc).isoformat(timespec="seconds"),
+            "last_upload_at": (
+                datetime.fromtimestamp(last_upload_at, timezone.utc).isoformat(timespec="seconds")
+                if last_upload_at else None
+            ),
+        }
+
+    def reset_traffic_stats(self):
+        with self._traffic_lock:
+            self._traffic_reset_at = time.time()
+            self._uploaded_bytes = 0
+            self._last_upload_at = None
+        return self.traffic_stats()

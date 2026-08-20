@@ -14,9 +14,11 @@ without exposing an inbound port on the monitored computer.
 - Tracks active browser websites through the browser extension.
 - Records background media separately from active usage.
 - Displays the current session and detailed timelines.
-- Provides daily, ranged, and all-time analysis.
+- Provides daily, ranged, and all-time analysis, including Windows-session
+  start times, end times, durations, and daily averages.
 - Organises applications and websites in hierarchical categories.
 - Supports renaming, merging, excluding, and reordering activities.
+- Groups private-browser activity without exposing individual visited sites.
 - Offers French and English interfaces.
 
 ## Usage limits
@@ -51,12 +53,16 @@ Notification rules can cover:
 - one or more warnings before a limit;
 - changes to a whole-computer limitation;
 - a successful remote PWA login;
+- connection and disconnection of the monitored computer;
+- a limit being exceeded, including after an exceptional extension;
 - a usage-duration threshold;
 - a configured time-of-day threshold.
 
 Threshold notifications can target the entire computer, a category, an
-application, or a website. Notification rules are currently global to the
-monitored computer rather than personal to each remote user.
+application, or a website. Each rule can use a Windows notification, an email,
+or both. Email transport is configured privately in the local settings; each
+user supplies their own recipient address when creating an email rule. Remote
+users see only their own notification rules.
 
 ## Interfaces
 
@@ -68,7 +74,8 @@ limit, notification, category, and user-management views.
 
 The remote PWA uses authenticated accounts with separate permissions for
 viewing and managing activity, limits, and notifications. Administrators can
-manage remote users and their access rights.
+manage remote users and their access rights. The current model supports one
+monitored computer shared by several PWA accounts.
 
 ## Browser extension
 
@@ -85,7 +92,9 @@ The Windows client sends snapshots to the optional backend and polls it for
 authorised commands. All client-to-backend connections are outbound HTTPS.
 
 The backend stores remote accounts, the latest device snapshot, and queued
-commands. Device credentials are never exposed to PWA users.
+commands. Commands created while the computer is offline remain visible and
+are delivered when it reconnects. Device credentials and email-transport
+secrets are never exposed to PWA users or committed to the repository.
 
 ## Requirements
 

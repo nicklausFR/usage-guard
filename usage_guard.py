@@ -1,3 +1,5 @@
+import base64
+import copy
 import json
 import os
 import shutil
@@ -5,10 +7,12 @@ import sys
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, date, timezone, timedelta
+from email.utils import parseaddr
 from pathlib import Path
 from urllib.parse import urlparse
 
 import yaml
+import win32crypt
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -242,10 +246,14 @@ class AppUsageStore:
         self._import_legacy_activity_file()
         self._backup_activity_file()
         self.data = self._load()
+        recipient_secrets_migrated = self._load_notification_recipient_secrets()
         self.data, encoding_repaired = _repair_mojibake_data(self.data)
         legacy_migrated = self._migrate_legacy_targets()
         legacy_sessions_migrated = self._synthesize_legacy_daily_sessions()
-        self._dirty = encoding_repaired or legacy_migrated or legacy_sessions_migrated
+        self._dirty = (
+            recipient_secrets_migrated or encoding_repaired
+            or legacy_migrated or legacy_sessions_migrated
+        )
         if encoding_repaired:
             backup = self.path.with_suffix(".encoding-backup.json")
             try:
@@ -370,6 +378,7 @@ class AppUsageStore:
             data.setdefault("notification_rules", [])
             data.setdefault("default_limit_warning_seconds", 300)
             data.setdefault("computer_block", {})
+            data.setdefault("remote_command_results", {})
             self._repair_sessions(data)
             self._repair_windows_sessions(data)
             data["version"] = 2
@@ -412,6 +421,7 @@ class AppUsageStore:
             "notification_rules": [],
             "default_limit_warning_seconds": 300,
             "computer_block": {},
+            "remote_command_results": {},
         }
 
     def record_windows_session(self, started_at, observed_at=None):
@@ -589,7 +599,9 @@ class AppUsageStore:
         kind = str(source.get("kind", ""))
         if kind not in {
             "limited_app_start", "limit_change", "limit_warning",
-            "pwa_login", "usage_threshold", "startup_reminder",
+            "limit_extension",
+            "pwa_login", "client_connected", "client_disconnected",
+            "usage_threshold", "startup_reminder",
             "computer_block_warning", "computer_block_change",
         }:
             raise ValueError("Type de notification non pris en charge.")
@@ -643,19 +655,36 @@ class AppUsageStore:
         })
         if kind == "startup_reminder" and not weekdays:
             raise ValueError("Choisissez au moins un jour pour le rappel au démarrage.")
+        channels = [
+            channel for channel in ("windows", "email")
+            if channel in set(source.get("channels") or ["windows"])
+        ]
+        if not channels:
+            raise ValueError("Choisissez au moins un mode de notification.")
+        email_recipient = str(source.get("email_recipient", "")).strip()
+        parsed_recipient = parseaddr(email_recipient)[1]
+        if "email" in channels and (
+            not parsed_recipient or "@" not in parsed_recipient
+            or "\r" in email_recipient or "\n" in email_recipient
+        ):
+            raise ValueError("Indiquez une adresse e-mail destinataire valide.")
         rule_id = str(source.get("id", ""))
         if rule_id.startswith("builtin:"):
             raise ValueError("Identifiant de notification réservé.")
         normalized = {
             "id": rule_id or uuid.uuid4().hex,
             "kind": kind,
+            "owner": str(source.get("owner", "")).strip(),
             "label": str(source.get("label", "")).strip() or (
                 "Démarrage d’une activité limitée" if kind == "limited_app_start"
                 else "Ajout ou modification d’une limite" if kind == "limit_change"
                 else "Préavis avant une limite" if kind == "limit_warning"
+                else "Dépassement d’une limite avec le joker" if kind == "limit_extension"
                 else "Préavis avant une limitation de l’ordinateur" if kind == "computer_block_warning"
                 else "Modification d’une limitation de l’ordinateur" if kind == "computer_block_change"
                 else "Connexion à la PWA" if kind == "pwa_login"
+                else "Connexion du client" if kind == "client_connected"
+                else "Déconnexion du client" if kind == "client_disconnected"
                 else f"Seuil de durée atteint" if kind == "usage_threshold" and threshold_mode == "duration"
                 else f"Horaire atteint" if kind == "usage_threshold" and threshold_mode == "time"
                 else f"Dépassement du seuil de {threshold} %" if kind == "usage_threshold"
@@ -673,6 +702,8 @@ class AppUsageStore:
             "valid_until_time": valid_until_time,
             "warning_seconds": warning_seconds,
             "weekdays": weekdays,
+            "channels": channels,
+            "email_recipient": email_recipient,
             "enabled": bool(source.get("enabled", True)),
         }
         rules = self.data.setdefault("notification_rules", [])
@@ -805,6 +836,22 @@ class AppUsageStore:
                 occurrence_day += timedelta(days=1)
                 if last_day and occurrence_day > last_day:
                     raise ValueError("La période de validité est déjà terminée.")
+        elif mode == "absolute_range":
+            try:
+                starts_at = datetime.combine(
+                    date.fromisoformat(str(valid_from)),
+                    datetime.strptime(str(valid_from_time), "%H:%M").time(),
+                ).astimezone()
+                ends_at = datetime.combine(
+                    date.fromisoformat(str(valid_until)),
+                    datetime.strptime(str(valid_until_time), "%H:%M").time(),
+                ).astimezone()
+            except (TypeError, ValueError):
+                raise ValueError("Période de blocage invalide.")
+            if starts_at < now:
+                starts_at = now
+            if starts_at >= ends_at:
+                raise ValueError("La fin de blocage doit être après son début.")
         elif mode == "range":
             try:
                 selected_start = datetime.strptime(
@@ -854,6 +901,17 @@ class AppUsageStore:
                     raise ValueError("Délai de blocage invalide.")
                 starts_at = now + timedelta(seconds=delay_seconds)
             ends_at = starts_at + timedelta(seconds=duration_seconds)
+        elif mode == "daily_duration":
+            try:
+                duration_seconds = int(duration_seconds)
+            except (TypeError, ValueError):
+                raise ValueError("Durée quotidienne invalide.")
+            if duration_seconds < 60:
+                raise ValueError("La durée doit être d’au moins une minute.")
+            starts_at = now
+            ends_at = datetime.combine(
+                now.date() + timedelta(days=1), datetime.min.time()
+            ).astimezone()
         else:
             raise ValueError("Durée de blocage de l’ordinateur invalide.")
         self.data["computer_block"] = {
@@ -870,6 +928,23 @@ class AppUsageStore:
                 "valid_from_time": str(valid_from_time or ""),
                 "valid_until": str(valid_until or ""),
                 "valid_until_time": str(valid_until_time or ""),
+            })
+        if mode == "absolute_range":
+            self.data["computer_block"].update({
+                "valid_from": str(valid_from or ""),
+                "valid_from_time": str(valid_from_time or ""),
+                "valid_until": str(valid_until or ""),
+                "valid_until_time": str(valid_until_time or ""),
+            })
+        if mode == "daily_duration":
+            self.data["computer_block"].update({
+                "limit_seconds": duration_seconds,
+                "valid_from": str(valid_from or ""),
+                "valid_from_time": str(valid_from_time or ""),
+                "valid_until": str(valid_until or ""),
+                "valid_until_time": str(valid_until_time or ""),
+                "schedule_start": str(start_time or ""),
+                "schedule_end": str(end_time or ""),
             })
         self._dirty = True
         self.save(force=True)
@@ -1138,6 +1213,14 @@ class AppUsageStore:
         executable = Path(str(context.app_name)).name.lower()
         host = _site_host(context.url)
         browser_apps = _browser_apps()
+        if app_name and executable in browser_apps and getattr(context, "generic_web", False):
+            return self._resolved_target(UsageTarget(
+                key=f"site:{executable}:other-sites",
+                label="Autres sites",
+                category=self.data["browser_categories"].get(
+                    executable, _browser_label(executable)
+                ),
+            ))
         if app_name and executable in browser_apps and host:
             site_key = host if self.is_browser_site_specific(executable, host) else "other-sites"
             local_category = _local_site_category(host)
@@ -1467,6 +1550,7 @@ class AppUsageStore:
         valid_until = str(saved.get("valid_until", defaults.get("valid_until", "")))
         return {
             "enabled": bool(saved.get("enabled", defaults.get("enabled", True))),
+            "target_key": str(saved.get("target_key", defaults.get("target_key", target_key))),
             "block_during_validity": bool(saved.get("block_during_validity", defaults.get("block_during_validity", False))),
             "limit_seconds": int(saved.get("limit_seconds", defaults.get("limit_seconds", 60))),
             "extension_seconds": int(saved.get("extension_seconds", defaults.get("extension_seconds", 60))),
@@ -1482,8 +1566,10 @@ class AppUsageStore:
         }
 
     def set_app_limit_settings(self, target_key, settings):
+        measured_target = str(settings.get("target_key") or target_key).strip()
         normalized = {
             "enabled": bool(settings.get("enabled", True)),
+            "target_key": measured_target,
             "block_during_validity": bool(settings.get("block_during_validity", False)),
             "limit_seconds": max(1, int(settings.get("limit_seconds", 60))),
             "extension_seconds": max(0, int(settings.get("extension_seconds", 60))),
@@ -1546,12 +1632,14 @@ class AppUsageStore:
         ):
             raise ValueError("Les heures de début et de fin doivent être différentes.")
         if normalized["block_during_validity"]:
-            if not normalized["valid_from"] and not normalized["valid_until"]:
-                raise ValueError("Un blocage par période exige au moins une borne datée.")
+            if (
+                not normalized["valid_from"]
+                and not normalized["valid_until"]
+                and not normalized["schedule_start"]
+            ):
+                raise ValueError("Un blocage par période exige au moins une borne datée ou un créneau horaire.")
             normalized["extension_seconds"] = 0
             normalized["blocked_after"] = ""
-            normalized["schedule_start"] = ""
-            normalized["schedule_end"] = ""
         normalized["warning_seconds"] = min(
             normalized["warning_seconds"], normalized["limit_seconds"]
         )
@@ -1583,7 +1671,7 @@ class AppUsageStore:
         self._dirty = True
         self.save(force=True)
 
-    def prepare_app_limit(self, target_key, limit_seconds, extension_seconds, when=None):
+    def prepare_app_limit(self, target_key, limit_seconds, extension_seconds, when=None, measured_target_key=None):
         """Initialize a limit from activity already measured in its rolling window."""
         state, moment, _ = self._rolling_limit_state(target_key, when)
         if int(state.get("usage_seed_version", 0)) >= 4:
@@ -1591,7 +1679,7 @@ class AppUsageStore:
         seed_start = datetime.combine(moment.date(), datetime.min.time()).replace(
             tzinfo=moment.tzinfo
         )
-        measured = self._daily_usage_for_limit(target_key, moment.date())
+        measured = self._daily_usage_for_limit(measured_target_key or target_key, moment.date())
         state["buckets"] = (
             {seed_start.isoformat(timespec="minutes"): measured}
             if measured > 0 else {}
@@ -2187,13 +2275,53 @@ class AppUsageStore:
             )
         return entries
 
+    @staticmethod
+    def _protect_notification_recipient(recipient):
+        encrypted = win32crypt.CryptProtectData(
+            str(recipient).encode("utf-8"),
+            "Usage Guard notification recipient", None, None, None, 0,
+        )
+        return "dpapi:" + base64.urlsafe_b64encode(encrypted).decode("ascii")
+
+    @staticmethod
+    def _unprotect_notification_recipient(protected):
+        if not str(protected).startswith("dpapi:"):
+            raise ValueError("Format de destinataire protégé inconnu.")
+        encrypted = base64.urlsafe_b64decode(str(protected)[6:].encode("ascii"))
+        return win32crypt.CryptUnprotectData(
+            encrypted, None, None, None, 0
+        )[1].decode("utf-8")
+
+    def _load_notification_recipient_secrets(self):
+        migrated = False
+        for rule in self.data.get("notification_rules", []):
+            protected = rule.get("email_recipient_protected")
+            if protected and not rule.get("email_recipient"):
+                try:
+                    rule["email_recipient"] = self._unprotect_notification_recipient(
+                        protected
+                    )
+                    rule.pop("email_recipient_protected", None)
+                except (OSError, ValueError, UnicodeError):
+                    rule["email_recipient"] = ""
+            elif rule.get("email_recipient"):
+                migrated = True
+        return migrated
+
     def save(self, force=False):
         if not self._dirty and not force:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(".json.tmp")
+        persisted = copy.deepcopy(self.data)
+        for rule in persisted.get("notification_rules", []):
+            recipient = str(rule.pop("email_recipient", "") or "").strip()
+            if recipient:
+                rule["email_recipient_protected"] = (
+                    self._protect_notification_recipient(recipient)
+                )
         temporary.write_text(
-            json.dumps(self.data, ensure_ascii=False, indent=2, sort_keys=True),
+            json.dumps(persisted, ensure_ascii=False, indent=2, sort_keys=True),
             encoding="utf-8",
         )
         os.replace(temporary, self.path)

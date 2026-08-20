@@ -26,6 +26,19 @@ async function publishTab(tabOrId) {
   const tab = typeof tabOrId === "number"
     ? await chrome.tabs.get(tabOrId).catch(() => null)
     : tabOrId;
+  if (tab?.incognito) {
+    await fetch(`${BRIDGE}/active`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({generic: true, audible: !!tab.audible})
+    }).catch(() => {});
+    await clearLegacyMute(tab);
+    await chrome.tabs.sendMessage(tab.id, {
+      type: "usage-guard-limit-state",
+      state: null
+    }).catch(() => {});
+    return;
+  }
   if (!tab || !tab.url) return;
   const url = sourceUrl(tab.url);
   if (!/^https?:\/\//.test(url)) return;
@@ -59,7 +72,7 @@ async function publishActiveTab(windowId = chrome.windows.WINDOW_ID_NONE) {
 
 async function publishOpenTabs() {
   const tabs = await chrome.tabs.query({});
-  const inventory = tabs.map((tab) => ({
+  const inventory = tabs.filter((tab) => !tab.incognito).map((tab) => ({
     url: sourceUrl(tab.url || ""),
     title: tab.title || "",
     audible: !!tab.audible

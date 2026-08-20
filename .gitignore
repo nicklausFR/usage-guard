@@ -35,3 +35,9 @@ LOCAL_NOTES.md
 remote-api-token.txt
 backend.json
 relay_client.py
+
+# Secrets et données privées du backend
+usage_guard_backend/.env
+usage_guard_backend/data/
+usage_guard_backend/*.sqlite3*
+usage_guard_backend/email*.json

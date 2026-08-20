@@ -8,7 +8,7 @@
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/png" sizes="192x192" href="usage-guard-192.png">
   <link rel="apple-touch-icon" href="usage-guard-192.png">
-  <link rel="stylesheet" href="style.css?v=1.049">
+  <link rel="stylesheet" href="style.css?v=1.075">
   <title>Usage Guard</title>
 </head>
 <body>
@@ -49,9 +49,14 @@
     </nav>
 
     <section id="today" class="panel active">
+      <div class="today-session-strip">
+        <div><strong id="today-session-date">—</strong><small>Sessions Windows du jour</small></div>
+        <div id="today-session-list" class="session-picker" role="listbox" aria-label="Sessions Windows du jour"></div>
+      </div>
       <div class="session-summary">
-        <div class="session-summary-head"><strong>Session en cours</strong><span id="on-time">—</span></div>
-        <div class="session-total-track" aria-label="Répartition de la session Windows"><i id="active-share"><span>Actif <b id="active-time">—</b></span></i><i id="passive-share"><span>Passif <b id="passive-time">—</b></span></i></div>
+        <div class="session-summary-head"><strong id="today-session-title">Session en cours</strong><span id="on-time">—</span></div>
+        <div class="session-total-track" aria-label="Répartition de la session Windows"><i id="active-share"></i><i id="passive-share"></i><i id="absence-share"></i></div>
+        <div class="session-total-legend"><span><i class="active"></i>Actif <b id="active-time">—</b></span><span><i class="passive"></i>Passif <b id="passive-time">—</b></span><span><i class="absence"></i>Absence <b id="absence-time">—</b></span></div>
         <div class="session-summary-foot"><time id="session-start">—</time><time id="session-end">—</time></div><span id="today-date" hidden></span>
       </div>
       <div id="today-usage" class="usage-tree"></div>
@@ -65,8 +70,8 @@
         <button id="new-analysis" class="primary" aria-expanded="false" aria-controls="analysis-type-menu">Faire une analyse</button>
         <div id="analysis-type-menu" class="choice-list" hidden>
           <button class="choice-back" data-workflow-cancel="analysis"><strong>← Retour</strong></button>
-          <button data-analysis-type="stats"><strong>Application ou catégorie</strong><small>Total, moyenne et détail par jour</small></button>
-          <button data-analysis-type="timeline"><strong>Session Windows</strong><small>Frise chronologique détaillée</small></button>
+          <button data-analysis-type="stats"><strong>Par jour</strong><small>Total, moyenne et détail par application ou catégorie</small></button>
+          <button data-analysis-type="hours"><strong>Horaires du PC</strong><small>Débuts, fins et durées des sessions Windows</small></button>
         </div>
       </div>
       <section id="analysis-stats-panel" class="analysis-section stats-section progressive-panel" hidden>
@@ -95,6 +100,11 @@
           <div id="analysis-stats-chart" class="history-chart stats-chart"></div>
         </div>
       </section>
+      <section id="analysis-hours-panel" class="analysis-section progressive-panel" hidden>
+        <button class="analysis-back" data-analysis-back="types">← Retour</button>
+        <div id="analysis-hours-summary" class="stats-summary"></div>
+        <div id="analysis-hours-list" class="session-hours-list"></div>
+      </section>
       <section id="analysis-timeline-panel" class="analysis-section progressive-panel" hidden>
         <div id="analysis-session-menu" class="choice-list analysis-choice-list"></div>
         <div id="analysis-classification-menu" class="choice-list analysis-choice-list" hidden></div>
@@ -108,15 +118,11 @@
 
     <section id="limits" class="panel">
       <div id="limit-create" class="progressive-action panel-action-menu">
-        <button id="new-limit" class="primary" aria-expanded="false" aria-controls="limit-target-menu">Nouvelle limitation</button>
-        <div id="limit-type-menu" hidden></div>
+        <button id="new-limit" class="primary" aria-expanded="false" aria-controls="limit-type-menu">Nouvelle limitation</button>
+        <div id="limit-type-menu" class="choice-list analysis-choice-list" hidden></div>
       </div>
       <div id="limit-workflow" class="inline-workflow" hidden>
-        <div id="limit-validity-menu" class="choice-list analysis-choice-list" hidden>
-          <button class="choice-back" data-limit-back="types"><strong>← Retour</strong></button>
-          <button data-limit-validity="permanent"><strong>Limite quotidienne permanente</strong><small>Définir un temps d’utilisation autorisé chaque jour</small></button>
-          <button data-limit-validity="period"><strong>Blocage par période</strong><small>Interdire l’utilisation entre des dates et heures précises</small></button>
-        </div>
+        <div id="limit-validity-menu" class="choice-list analysis-choice-list" hidden></div>
         <div id="limit-target-menu" class="choice-list analysis-choice-list" hidden></div>
         <form id="limit-validity-form" class="workflow-input-form" hidden>
           <h3>Période de blocage</h3>
@@ -162,6 +168,16 @@
           <button type="submit" class="primary">Enregistrer</button>
           <button type="button" data-limit-back="validity">← Retour</button>
         </form>
+        <form id="computer-duration-form" class="workflow-input-form" hidden>
+          <h3>Limitation ponctuelle</h3>
+          <label for="computer-duration-value">Durée de blocage à partir de maintenant</label>
+          <div class="duration-fields">
+            <input id="computer-duration-value" type="number" min="1" step="1" required>
+            <select id="computer-duration-unit"><option value="minutes">Minutes</option><option value="hours">Heures</option></select>
+          </div>
+          <button type="submit" class="primary">Bloquer maintenant</button>
+          <button type="button" data-limit-back="validity">← Retour</button>
+        </form>
       </div>
       <div id="limits-list" class="cards"></div>
     </section>
@@ -174,8 +190,11 @@
           <button data-notification-type="limited_app_start"><strong>Au démarrage d’une application limitée</strong></button>
           <button data-notification-type="limit_change"><strong>Si une limite est ajoutée ou modifiée</strong></button>
           <button data-notification-type="limit_warning"><strong>Prévenir avant la limite</strong></button>
+          <button data-notification-type="limit_extension"><strong>Si une limite est dépassée avec le joker</strong></button>
           <button data-notification-type="computer_block_change"><strong>Si une limitation de l’ordinateur est modifiée</strong></button>
           <button data-notification-type="pwa_login"><strong>Si quelqu’un se connecte à la PWA</strong></button>
+          <button data-notification-type="client_connected"><strong>Si le client se connecte</strong></button>
+          <button data-notification-type="client_disconnected"><strong>Si le client se déconnecte</strong></button>
           <button data-notification-type="usage_threshold"><strong>Au dépassement d’un seuil</strong></button>
         </div>
       </div>
@@ -235,6 +254,17 @@
           <button id="notification-warning-submit" type="submit" class="primary">Ajouter</button>
           <button type="button" data-notification-back="target">← Retour</button>
         </form>
+        <form id="notification-delivery-form" class="workflow-input-form" hidden>
+          <button type="button" data-notification-back="delivery-previous">← Retour</button>
+          <h3>Mode de notification</h3>
+          <div class="notification-channel-options">
+            <label><input type="radio" name="delivery" value="windows"> Notification Windows</label>
+            <label><input type="radio" name="delivery" value="email"> E-mail</label>
+            <label><input type="radio" name="delivery" value="both"> Les deux</label>
+          </div>
+          <label id="notification-email-recipient-label">Adresse destinataire<input id="notification-email-recipient" name="email_recipient" type="email" autocomplete="email"></label>
+          <button type="submit" class="primary">Enregistrer</button>
+        </form>
       </div>
       <div id="notifications-list" class="cards"></div>
     </section>
@@ -256,6 +286,36 @@
           <option value="dark">Sombre</option>
           <option value="light">Clair</option>
         </select>
+        <div class="settings-subheading"><strong>Couleurs</strong><small>Barres, absences et inactivité</small></div>
+        <label for="color-progress"><strong>Progression</strong><small>Temps actif et limites normales</small></label>
+        <input id="color-progress" type="color" value="#0f766e">
+        <label for="color-absence"><strong>Absence</strong><small>Temps sans activité détectée</small></label>
+        <input id="color-absence" type="color" value="#8a9390">
+        <label for="color-inactive"><strong>Inactivité</strong><small>Ouvert, non actif</small></label>
+        <input id="color-inactive" type="color" value="#84918f">
+        <label for="color-warning"><strong>Alerte</strong><small>Joker et 10 derniers %</small></label>
+        <input id="color-warning" type="color" value="#f59e0b">
+        <button id="reset-ui-colors" type="button">Réinitialiser les couleurs</button>
+        </div>
+      </section>
+      <section id="email-settings-section" class="settings-section" aria-labelledby="email-settings-title">
+        <h2 id="email-settings-title">Notifications par e-mail</h2>
+        <div class="settings-card email-settings-card">
+          <form id="email-settings-form">
+            <div class="email-settings-grid">
+              <label>Serveur SMTP<input name="smtp_host" autocomplete="off" placeholder="smtp.example.fr"></label>
+              <label>Port<input name="smtp_port" type="number" min="1" max="65535" value="587" required></label>
+              <label>Sécurité<select name="security"><option value="starttls">STARTTLS</option><option value="ssl">SSL / TLS</option><option value="none">Aucune</option></select></label>
+              <label>Identifiant<input name="username" autocomplete="username"></label>
+              <label>Mot de passe<input name="password" type="password" autocomplete="new-password"></label>
+              <label>Expéditeur<input name="sender" type="email" autocomplete="email" placeholder="usage-guard@example.fr"></label>
+            </div>
+            <p id="email-settings-status" role="status"></p>
+            <div class="email-settings-actions">
+              <button type="submit" class="primary">Enregistrer</button>
+              <button id="test-email-settings" type="button">Tester</button>
+            </div>
+          </form>
         </div>
       </section>
       <section id="users-settings-section" class="settings-section" aria-labelledby="users-settings-title">
@@ -284,6 +344,20 @@
         <div class="user-actions"><button id="refresh-users">Actualiser</button><button id="create-user" class="primary">Créer un utilisateur</button></div>
         </div>
       </section>
+      <section id="backend-traffic-section" class="settings-section" aria-labelledby="backend-traffic-title">
+        <h2 id="backend-traffic-title">Synchronisation distante</h2>
+        <div class="settings-card traffic-card">
+          <div><strong>Flux téléversé vers le serveur</strong><small>Mesure locale depuis le dernier reset</small></div>
+          <div class="traffic-grid" id="backend-traffic">
+            <div><span>Total</span><strong id="backend-upload-total">—</strong></div>
+            <div><span>Moyenne</span><strong id="backend-upload-rate">—</strong></div>
+            <div><span>Depuis</span><strong id="backend-upload-elapsed">—</strong></div>
+            <div><span>Dernier envoi</span><strong id="backend-upload-last">—</strong></div>
+          </div>
+          <p id="backend-traffic-status">Chargement de la mesure locale…</p>
+          <div class="traffic-actions"><button id="refresh-backend-traffic">Actualiser</button><button id="reset-backend-traffic" class="danger">Remettre à zéro</button></div>
+        </div>
+      </section>
       <section id="defaults-settings-section" class="settings-section" aria-labelledby="defaults-settings-title">
         <h2 id="defaults-settings-title">Valeurs par défaut</h2>
         <div class="settings-card">
@@ -302,7 +376,7 @@
   <dialog id="action-dialog"><form method="dialog"><div class="dialog-head"><h2 id="action-title">Modifier</h2><button type="submit" value="cancel" formnovalidate class="icon-button" aria-label="Fermer">×</button></div><div id="action-fields"></div><div class="dialog-actions"><button type="submit" value="cancel" formnovalidate>Retour</button><button type="submit" id="action-submit" value="default" class="primary">Enregistrer</button></div></form></dialog>
   <div id="context-menu" class="context-menu" role="menu" hidden></div>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="i18n.js?v=1.049"></script>
-  <script src="app.js?v=1.049"></script>
+  <script src="i18n.js?v=1.075"></script>
+  <script src="app.js?v=1.075"></script>
 </body>
 </html>

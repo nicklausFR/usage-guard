@@ -83,6 +83,67 @@ class RemoteControlServerTest(unittest.TestCase):
             urlopen(request, timeout=2)
         self.assertEqual(error.exception.code, 421)
 
+    def test_local_backend_traffic_can_be_read_and_reset(self):
+        class Backend:
+            configured = True
+
+            def __init__(self):
+                self.reset = False
+
+            def traffic_stats(self):
+                return {
+                    "enabled": True, "configured": True,
+                    "uploaded_bytes": 2048, "elapsed_seconds": 120,
+                    "upload_rate_bytes_per_minute": 1024,
+                    "reset_at": "2026-08-20T10:00:00+00:00",
+                    "last_upload_at": "2026-08-20T10:01:00+00:00",
+                }
+
+            def reset_traffic_stats(self):
+                self.reset = True
+                return {
+                    "enabled": True, "configured": True,
+                    "uploaded_bytes": 0, "elapsed_seconds": 0,
+                    "upload_rate_bytes_per_minute": 0,
+                    "reset_at": "2026-08-20T10:02:00+00:00",
+                    "last_upload_at": None,
+                }
+
+        self.server.backend_client = Backend()
+
+        status, stats = self._json("/api/v1/backend/traffic")
+        self.assertEqual(status, 200)
+        self.assertEqual(stats["uploaded_bytes"], 2048)
+
+        status, reset = self._json("/api/v1/backend/traffic/reset", method="POST")
+        self.assertEqual(status, 200)
+        self.assertEqual(reset["uploaded_bytes"], 0)
+        self.assertTrue(self.server.backend_client.reset)
+
+    def test_local_pwa_can_manage_and_test_backend_email(self):
+        class Backend:
+            configured = True
+
+            def email_settings(self):
+                return {"email_settings": {"enabled": False}}
+
+            def save_email_settings(self, settings):
+                return {"ok": True, "email_settings": settings}
+
+            def test_email_settings(self, recipient):
+                return {"ok": True, "recipient": recipient}
+
+        self.server.backend_client = Backend()
+        _, current = self._json("/api/v1/backend/email")
+        self.assertFalse(current["email_settings"]["enabled"])
+        _, saved = self._json("/api/v1/backend/email", "POST", {"enabled": True})
+        self.assertTrue(saved["email_settings"]["enabled"])
+        _, tested = self._json(
+            "/api/v1/backend/email/test", "POST",
+            {"recipient": "owner@example.test"},
+        )
+        self.assertEqual(tested["recipient"], "owner@example.test")
+
 
 if __name__ == "__main__":
     unittest.main()
