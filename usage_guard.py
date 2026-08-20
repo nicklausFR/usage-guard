@@ -751,10 +751,11 @@ class AppUsageStore:
                 selected_end = datetime.strptime(str(end_time), "%H:%M").time()
             except (TypeError, ValueError):
                 raise ValueError("Heures de début et de fin invalides.")
-            if selected_end <= selected_start:
-                raise ValueError("L’heure de fin doit être après l’heure de début.")
+            if selected_end == selected_start:
+                raise ValueError("Les heures de début et de fin doivent être différentes.")
+            crosses_midnight = selected_end < selected_start
             try:
-                first_day = date.fromisoformat(str(valid_from)) if valid_from else now.date()
+                first_day = date.fromisoformat(str(valid_from)) if valid_from else None
                 last_day = date.fromisoformat(str(valid_until)) if valid_until else None
                 first_boundary = (
                     datetime.combine(
@@ -778,13 +779,21 @@ class AppUsageStore:
                 raise ValueError("La date de fin doit être accompagnée de son heure.")
             if first_boundary and last_boundary and last_boundary <= first_boundary:
                 raise ValueError("La fin de validité doit être après son début.")
-            occurrence_day = max(now.date(), first_day)
+            occurrence_day = now.date()
+            if (
+                crosses_midnight
+                and now.time().replace(tzinfo=None) < selected_end
+            ):
+                occurrence_day -= timedelta(days=1)
+            if first_day:
+                occurrence_day = max(occurrence_day, first_day)
             while True:
                 requested_start = datetime.combine(
                     occurrence_day, selected_start
                 ).astimezone()
                 requested_end = datetime.combine(
-                    occurrence_day, selected_end
+                    occurrence_day + timedelta(days=1) if crosses_midnight else occurrence_day,
+                    selected_end,
                 ).astimezone()
                 starts_at = max(
                     requested_start, now,
@@ -809,9 +818,12 @@ class AppUsageStore:
             requested_start = datetime.combine(
                 now.date(), selected_start
             ).astimezone()
-            ends_at = datetime.combine(now.date(), selected_end).astimezone()
-            if ends_at <= requested_start:
-                raise ValueError("L’heure de fin doit être après l’heure de début.")
+            if selected_end == selected_start:
+                raise ValueError("Les heures de début et de fin doivent être différentes.")
+            end_day = now.date() + (
+                timedelta(days=1) if selected_end < selected_start else timedelta()
+            )
+            ends_at = datetime.combine(end_day, selected_end).astimezone()
             starts_at = max(now, requested_start)
             if starts_at >= ends_at:
                 raise ValueError("L’heure de fin est déjà passée.")
@@ -1455,6 +1467,7 @@ class AppUsageStore:
         valid_until = str(saved.get("valid_until", defaults.get("valid_until", "")))
         return {
             "enabled": bool(saved.get("enabled", defaults.get("enabled", True))),
+            "block_during_validity": bool(saved.get("block_during_validity", defaults.get("block_during_validity", False))),
             "limit_seconds": int(saved.get("limit_seconds", defaults.get("limit_seconds", 60))),
             "extension_seconds": int(saved.get("extension_seconds", defaults.get("extension_seconds", 60))),
             "warning_seconds": int(saved.get("warning_seconds", defaults.get("warning_seconds", 15))),
@@ -1471,8 +1484,9 @@ class AppUsageStore:
     def set_app_limit_settings(self, target_key, settings):
         normalized = {
             "enabled": bool(settings.get("enabled", True)),
+            "block_during_validity": bool(settings.get("block_during_validity", False)),
             "limit_seconds": max(1, int(settings.get("limit_seconds", 60))),
-            "extension_seconds": max(1, int(settings.get("extension_seconds", 60))),
+            "extension_seconds": max(0, int(settings.get("extension_seconds", 60))),
             "warning_seconds": max(1, int(settings.get("warning_seconds", 15))),
             "blocked_after": str(settings.get("blocked_after", "")).strip(),
             "schedule_date": str(settings.get("schedule_date", "")).strip(),
@@ -1528,9 +1542,16 @@ class AppUsageStore:
             raise ValueError("Indiquez le début et la fin de la plage horaire.")
         if (
             normalized["schedule_start"]
-            and normalized["schedule_start"] >= normalized["schedule_end"]
+            and normalized["schedule_start"] == normalized["schedule_end"]
         ):
-            raise ValueError("La fin de la plage doit être après son début.")
+            raise ValueError("Les heures de début et de fin doivent être différentes.")
+        if normalized["block_during_validity"]:
+            if not normalized["valid_from"] and not normalized["valid_until"]:
+                raise ValueError("Un blocage par période exige au moins une borne datée.")
+            normalized["extension_seconds"] = 0
+            normalized["blocked_after"] = ""
+            normalized["schedule_start"] = ""
+            normalized["schedule_end"] = ""
         normalized["warning_seconds"] = min(
             normalized["warning_seconds"], normalized["limit_seconds"]
         )

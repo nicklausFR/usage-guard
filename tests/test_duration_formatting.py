@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,6 +67,44 @@ class DurationFormattingTest(unittest.TestCase):
         self.assertFalse(after["active"])
         self.assertFalse(after["pending"])
 
+    def test_recurring_computer_block_crosses_midnight(self):
+        limiter = AppLimiter.__new__(AppLimiter)
+        limiter.usage = SimpleNamespace(data={"computer_block": {
+            "enabled": True, "mode": "schedule",
+            "daily_start": "23:00", "daily_end": "02:00",
+            "valid_from": "", "valid_from_time": "",
+            "valid_until": "", "valid_until_time": "",
+        }})
+
+        before_midnight = limiter.computer_block_status(
+            datetime.fromisoformat("2026-08-15T23:30:00+02:00")
+        )
+        after_midnight = limiter.computer_block_status(
+            datetime.fromisoformat("2026-08-16T01:30:00+02:00")
+        )
+        outside = limiter.computer_block_status(
+            datetime.fromisoformat("2026-08-16T12:00:00+02:00")
+        )
+
+        self.assertTrue(before_midnight["active"])
+        self.assertTrue(after_midnight["active"])
+        self.assertEqual(after_midnight["daily_start"], "23:00")
+        self.assertEqual(after_midnight["daily_end"], "02:00")
+        self.assertFalse(outside["active"])
+        self.assertTrue(outside["pending"])
+
+    def test_application_schedule_crosses_midnight(self):
+        policy = {"schedule_start": "23:00", "schedule_end": "02:00"}
+        self.assertTrue(AppLimiter._schedule_status(
+            policy, datetime.fromisoformat("2026-08-15T23:30:00+02:00")
+        )["active"])
+        self.assertTrue(AppLimiter._schedule_status(
+            policy, datetime.fromisoformat("2026-08-16T01:30:00+02:00")
+        )["active"])
+        self.assertFalse(AppLimiter._schedule_status(
+            policy, datetime.fromisoformat("2026-08-16T12:00:00+02:00")
+        )["active"])
+
     def test_recurring_computer_block_is_kept_until_final_validity_end(self):
         block = {
             "enabled": True, "mode": "schedule",
@@ -109,6 +148,32 @@ class DurationFormattingTest(unittest.TestCase):
         self.assertEqual(limiter.computer_block_warning_seconds(), 900)
 
 
+    def test_period_block_has_no_allowed_usage_while_active(self):
+        limiter = AppLimiter.__new__(AppLimiter)
+        limiter.policies = {"app:test": {
+            "enabled": True,
+            "block_during_validity": True,
+            "limit_seconds": 3600,
+            "extension_seconds": 0,
+            "valid_from": "2026-08-15", "valid_from_time": "10:00",
+            "valid_until": "2026-08-15", "valid_until_time": "20:00",
+            "schedule_date": "", "schedule_start": "", "schedule_end": "",
+            "blocked_after": "",
+        }}
+        limiter.usage = SimpleNamespace(
+            app_limit_state_for_day=lambda _key: {"seconds": 0, "extension_used": False}
+        )
+
+        with patch("app_limiter.datetime") as clock:
+            clock.now.return_value = datetime.fromisoformat("2026-08-15T12:00:00+02:00")
+            clock.combine.side_effect = datetime.combine
+            clock.strptime.side_effect = datetime.strptime
+            status = limiter.current_status("app:test")
+
+        self.assertEqual(status["allowed"], 0)
+        self.assertEqual(status["remaining"], 0)
+
+
 class TrayProgressCardTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -143,7 +208,7 @@ class TrayProgressCardTest(unittest.TestCase):
         self.assertFalse(card.empty_state.isHidden())
         self.assertEqual(card.findChildren(QProgressBar), [])
 
-    def test_pending_computer_limit_is_shown_without_progress_bar(self):
+    def test_pending_daily_computer_limit_has_no_fake_progress_bar(self):
         limiter = SimpleNamespace(
             policies={},
             computer_block_status=lambda: {
@@ -166,6 +231,7 @@ class TrayProgressCardTest(unittest.TestCase):
         labels = [label.text() for label in card.findChildren(QLabel)]
         self.assertIn("Tout l’ordinateur", labels)
         self.assertTrue(any("14:00" in text and "18:00" in text for text in labels))
+        self.assertTrue(any(label.objectName() == "limitRemaining" for label in card.findChildren(QLabel)))
 
     def test_configured_computer_limit_stays_visible_outside_its_time_range(self):
         limiter = SimpleNamespace(
@@ -186,7 +252,33 @@ class TrayProgressCardTest(unittest.TestCase):
         self.assertTrue(card.empty_state.isHidden())
         self.assertEqual(card.findChildren(QProgressBar), [])
         labels = [label.text() for label in card.findChildren(QLabel)]
-        self.assertTrue(any("hors plage" in text for text in labels))
+        self.assertTrue(any("14:00" in text and "18:00" in text for text in labels))
+
+    def test_temporal_application_limit_uses_the_same_progress_layout(self):
+        limiter = SimpleNamespace(
+            policies={"app:test": {
+                "enabled": True, "block_during_validity": True,
+                "valid_from": "2026-08-16", "valid_from_time": "10:00",
+                "valid_until": "2026-08-16", "valid_until_time": "12:00",
+            }},
+            current_status=lambda _key: {
+                "seconds": 0, "allowed": 0, "remaining": 0,
+                "schedule_active": True, "schedule_pending": False,
+            },
+            label_for_key=lambda _key: "Application test",
+            computer_block_status=lambda: {},
+        )
+        usage = SimpleNamespace(
+            usage_for_day=lambda: {}, presentation=lambda _usage: [],
+        )
+        card = TrayProgressCard(SimpleNamespace(app_limiter=limiter, usage=usage))
+
+        card.refresh()
+
+        labels = [label.text() for label in card.findChildren(QLabel)]
+        self.assertIn("Application test", labels)
+        self.assertTrue(any("16/08/2026 10:00" in text for text in labels))
+        self.assertEqual(len(card.findChildren(QProgressBar)), 1)
 
 
 if __name__ == "__main__":

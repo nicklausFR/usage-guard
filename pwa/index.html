@@ -8,7 +8,7 @@
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/png" sizes="192x192" href="usage-guard-192.png">
   <link rel="apple-touch-icon" href="usage-guard-192.png">
-  <link rel="stylesheet" href="style.css?v=1.046">
+  <link rel="stylesheet" href="style.css?v=1.049">
   <title>Usage Guard</title>
 </head>
 <body>
@@ -64,25 +64,25 @@
       <div class="progressive-action panel-action-menu">
         <button id="new-analysis" class="primary" aria-expanded="false" aria-controls="analysis-type-menu">Faire une analyse</button>
         <div id="analysis-type-menu" class="choice-list" hidden>
+          <button class="choice-back" data-workflow-cancel="analysis"><strong>← Retour</strong></button>
           <button data-analysis-type="stats"><strong>Application ou catégorie</strong><small>Total, moyenne et détail par jour</small></button>
           <button data-analysis-type="timeline"><strong>Session Windows</strong><small>Frise chronologique détaillée</small></button>
-          <button data-workflow-cancel="analysis"><strong>← Retour</strong></button>
         </div>
       </div>
       <section id="analysis-stats-panel" class="analysis-section stats-section progressive-panel" hidden>
         <div id="analysis-stats-kind-menu" class="choice-list analysis-choice-list">
+          <button class="choice-back" data-analysis-back="types"><strong>← Retour</strong></button>
           <button data-stats-kind="category"><strong>Catégories</strong></button>
           <button data-stats-kind="application"><strong>Applications et sites</strong></button>
-          <button data-analysis-back="types"><strong>← Retour</strong></button>
         </div>
         <div id="analysis-stats-target-menu" class="choice-list analysis-choice-list" hidden></div>
         <div id="analysis-stats-period-menu" class="choice-list analysis-choice-list" hidden>
+          <button class="choice-back" data-analysis-back="stats-target"><strong>← Retour</strong></button>
           <button data-stats-period="today"><strong>Aujourd’hui</strong></button>
           <button data-stats-period="7"><strong>7 derniers jours</strong></button>
           <button data-stats-period="30"><strong>30 derniers jours</strong></button>
           <button data-stats-period="all"><strong>Toute la période</strong></button>
           <button data-stats-period="custom"><strong>Choisir les dates</strong></button>
-          <button data-analysis-back="stats-target"><strong>← Retour</strong></button>
         </div>
         <form id="analysis-stats-custom-period" class="compact-period" hidden>
           <input id="analysis-stats-start" type="date" aria-label="Date de début" required>
@@ -113,13 +113,13 @@
       </div>
       <div id="limit-workflow" class="inline-workflow" hidden>
         <div id="limit-validity-menu" class="choice-list analysis-choice-list" hidden>
-          <button data-limit-validity="permanent"><strong>Validité permanente</strong><small>La règle reste active sans date de fin</small></button>
-          <button data-limit-validity="period"><strong>Définir une période</strong><small>À partir d’une date, jusqu’à une date, ou les deux</small></button>
-          <button data-limit-back="types"><strong>← Retour</strong></button>
+          <button class="choice-back" data-limit-back="types"><strong>← Retour</strong></button>
+          <button data-limit-validity="permanent"><strong>Limite quotidienne permanente</strong><small>Définir un temps d’utilisation autorisé chaque jour</small></button>
+          <button data-limit-validity="period"><strong>Blocage par période</strong><small>Interdire l’utilisation entre des dates et heures précises</small></button>
         </div>
         <div id="limit-target-menu" class="choice-list analysis-choice-list" hidden></div>
         <form id="limit-validity-form" class="workflow-input-form" hidden>
-          <h3>Période de validité</h3>
+          <h3>Période de blocage</h3>
           <div class="time-range-fields">
             <label>À partir du<input id="limit-valid-from" type="date"></label>
             <label>À<input id="limit-valid-from-time" type="time"></label>
@@ -128,8 +128,8 @@
             <label>Jusqu’au<input id="limit-valid-until" type="date"></label>
             <label>À<input id="limit-valid-until-time" type="time"></label>
           </div>
-          <small>Renseignez au moins une date avec son heure. Les deux bornes sont incluses.</small>
-          <button type="submit" class="primary">Continuer</button>
+          <small>Renseignez au moins une borne avec sa date et son heure. La cible sera interdite pendant cette période.</small>
+          <button type="submit" class="primary">Enregistrer</button>
           <button type="button" data-limit-back="validity">← Retour</button>
         </form>
         <form id="limit-custom-form" class="workflow-input-form" hidden>
@@ -170,21 +170,21 @@
       <div id="notification-create" class="progressive-action panel-action-menu">
         <button id="new-notification" class="primary" aria-expanded="false" aria-controls="notification-type-menu">Nouvelle notification</button>
         <div id="notification-type-menu" class="choice-list compact-choice-list" hidden>
+          <button class="choice-back" data-workflow-cancel="notification"><strong>← Retour</strong></button>
           <button data-notification-type="limited_app_start"><strong>Au démarrage d’une application limitée</strong></button>
           <button data-notification-type="limit_change"><strong>Si une limite est ajoutée ou modifiée</strong></button>
           <button data-notification-type="limit_warning"><strong>Prévenir avant la limite</strong></button>
           <button data-notification-type="computer_block_change"><strong>Si une limitation de l’ordinateur est modifiée</strong></button>
           <button data-notification-type="pwa_login"><strong>Si quelqu’un se connecte à la PWA</strong></button>
           <button data-notification-type="usage_threshold"><strong>Au dépassement d’un seuil</strong></button>
-          <button data-workflow-cancel="notification"><strong>← Retour</strong></button>
         </div>
       </div>
       <div id="notification-workflow" class="inline-workflow" hidden>
         <div id="notification-threshold-type-menu" class="choice-list analysis-choice-list" hidden>
+          <button class="choice-back" data-notification-back="types"><strong>← Retour</strong></button>
           <p class="choice-heading">Type de seuil</p>
           <button data-notification-threshold-mode="duration"><strong>Durée d’utilisation</strong><small>Prévenir après une durée définie</small></button>
           <button data-notification-threshold-mode="time"><strong>Horaire</strong><small>Prévenir après une certaine heure</small></button>
-          <button data-notification-back="types"><strong>← Retour</strong></button>
         </div>
         <div id="notification-target-type-menu" hidden></div>
         <div id="notification-target-menu" class="choice-list analysis-choice-list" hidden></div>
@@ -207,10 +207,10 @@
           <button type="button" data-notification-back="threshold-type">← Retour</button>
         </form>
         <div id="notification-validity-menu" class="choice-list analysis-choice-list" hidden>
+          <button class="choice-back" data-notification-back="threshold-value"><strong>← Retour</strong></button>
           <p class="choice-heading">Validité de la notification</p>
           <button data-notification-validity="permanent"><strong>Validité permanente</strong><small>La notification reste active sans date de fin</small></button>
           <button data-notification-validity="period"><strong>Définir une période</strong><small>À partir d’une date, jusqu’à une date, ou les deux</small></button>
-          <button data-notification-back="threshold-value"><strong>← Retour</strong></button>
         </div>
         <form id="notification-validity-form" class="workflow-input-form" hidden>
           <h3>Période de validité</h3>
@@ -302,7 +302,7 @@
   <dialog id="action-dialog"><form method="dialog"><div class="dialog-head"><h2 id="action-title">Modifier</h2><button type="submit" value="cancel" formnovalidate class="icon-button" aria-label="Fermer">×</button></div><div id="action-fields"></div><div class="dialog-actions"><button type="submit" value="cancel" formnovalidate>Retour</button><button type="submit" id="action-submit" value="default" class="primary">Enregistrer</button></div></form></dialog>
   <div id="context-menu" class="context-menu" role="menu" hidden></div>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="i18n.js?v=1.046"></script>
-  <script src="app.js?v=1.046"></script>
+  <script src="i18n.js?v=1.049"></script>
+  <script src="app.js?v=1.049"></script>
 </body>
 </html>

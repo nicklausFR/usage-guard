@@ -1,5 +1,7 @@
 # Journal des versions
 
+15/08/2026 15:56 — développement local — La création d’une limitation regroupe les applications sans catégorie dans une branche dédiée ; un blocage par période interdit désormais directement la cible entre les dates et heures saisies, sans demander ensuite une durée quotidienne.
+
 15/08/2026 15:50 — développement local — Le bandeau de limite de l’extension navigateur tient désormais sur une seule ligne compacte, avec la barre de progression entre le libellé et le temps restant.
 
 ## Développement local
@@ -125,3 +127,6 @@
 15/08/2026 12:46 — v1.044 — Seuils par durée ou horaire, cibles hiérarchiques, validité datée, échéances expirées supprimées et préavis multiples regroupés.
 15/08/2026 14:36 — v1.045 — Tri décroissant des activités et paramètres distants réservés aux administrateurs.
 15/08/2026 15:27 — v1.046 — Frises centrées sur les activités réelles et reconstruction des sessions historiques à partir des totaux journaliers.
+15/08/2026 16:02 — v1.047 — Cibles non classées regroupées et blocage direct par période avec dates et heures, sans durée quotidienne.
+16/08/2026 13:05 — v1.048 — Plages horaires sur deux jours, retours en haut des listes et affichage renforcé des limitations temporelles dans le systray.
+16/08/2026 14:02 — v1.049 — Correction des résumés quotidiens et suppression de la barre artificielle dans le systray.

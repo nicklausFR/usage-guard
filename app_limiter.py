@@ -125,16 +125,18 @@ class LimitOverlay(QWidget):
         self.controller.close_target()
         event.accept()
 
-    def configure(self, label, available, extension_seconds):
+    def configure(self, label, available, extension_seconds, period_block=False):
         self.setWindowTitle(_("{label} — limite atteinte").format(label=label))
         self.close_button.setText(_("Fermer {label}").format(label=label))
+        self.extension_button.setVisible(not period_block)
         self.extension_button.setEnabled(available)
         self.extension_button.setText(
             _("Obtenir une rallonge exceptionnelle de {seconds} sec").format(seconds=extension_seconds)
             if available else _("Rallonge déjà utilisée sur les dernières 24 h")
         )
         self.message.setText(
-            _("{label} est bloquée. Une rallonge exceptionnelle est disponible.").format(label=label)
+            _("{label} est bloquée pendant la période planifiée.").format(label=label)
+            if period_block else _("{label} est bloquée. Une rallonge exceptionnelle est disponible.").format(label=label)
             if available else _("{label} est bloquée sur la période de 24 h.").format(label=label)
         )
 
@@ -232,14 +234,15 @@ class AppLimiter(QObject):
             if block.get("enabled") and block.get("mode") == "schedule":
                 start_time = datetime.strptime(block["daily_start"], "%H:%M").time()
                 end_time = datetime.strptime(block["daily_end"], "%H:%M").time()
-                first_day = date.fromisoformat(block["valid_from"]) if block.get("valid_from") else now.date()
+                crosses_midnight = end_time < start_time
+                first_day = date.fromisoformat(block["valid_from"]) if block.get("valid_from") else None
                 last_day = date.fromisoformat(block["valid_until"]) if block.get("valid_until") else None
                 first_boundary = (
                     datetime.combine(
                         first_day,
                         datetime.strptime(block.get("valid_from_time") or "00:00", "%H:%M").time(),
                     ).replace(tzinfo=now.tzinfo)
-                    if block.get("valid_from") else None
+                    if first_day else None
                 )
                 last_boundary = (
                     datetime.combine(
@@ -250,10 +253,20 @@ class AppLimiter(QObject):
                 )
                 if last_boundary and now >= last_boundary:
                     return {**block, "active": False, "pending": False}
-                occurrence_day = max(now.date(), first_day)
+                occurrence_day = now.date()
+                if (
+                    crosses_midnight
+                    and now.time().replace(tzinfo=None) < end_time
+                ):
+                    occurrence_day -= timedelta(days=1)
+                if first_day:
+                    occurrence_day = max(occurrence_day, first_day)
                 while True:
                     raw_start = datetime.combine(occurrence_day, start_time).replace(tzinfo=now.tzinfo)
-                    raw_end = datetime.combine(occurrence_day, end_time).replace(tzinfo=now.tzinfo)
+                    raw_end = datetime.combine(
+                        occurrence_day + timedelta(days=1) if crosses_midnight else occurrence_day,
+                        end_time,
+                    ).replace(tzinfo=now.tzinfo)
                     starts_at = max(raw_start, first_boundary or raw_start)
                     ends_at = min(raw_end, last_boundary or raw_end)
                     if starts_at < ends_at and now < ends_at:
@@ -549,6 +562,7 @@ class AppLimiter(QObject):
                 "handles": [item[0] for item in windows],
                 "process_ids": list(dict.fromkeys(item[1] for item in windows)),
                 "limit_seconds": policy["limit_seconds"],
+                "block_during_validity": bool(policy.get("block_during_validity")),
                 **status,
             })
         self._running_limits = running
@@ -567,9 +581,14 @@ class AppLimiter(QObject):
             token = (item["key"], item["process_id"])
             self._notified_handles.add(token)
             if self._notification_enabled("limited_app_start", item["key"]):
+                message = (
+                    "Utilisation interdite pendant la période planifiée."
+                    if item.get("block_during_validity")
+                    else f"Usage limité : {self._format_duration(item['limit_seconds'])}."
+                )
                 self.notification_requested.emit(
                     f"{item['label']} — Usage Guard",
-                    f"Usage limité : {self._format_duration(item['limit_seconds'])}.",
+                    message,
                     item["process_id"],
                 )
         return running
@@ -718,9 +737,14 @@ class AppLimiter(QObject):
         if notification_token not in self._notified_handles:
             self._notified_handles.add(notification_token)
             if self._notification_enabled("limited_app_start", target_key):
+                message = (
+                    "Utilisation interdite pendant la période planifiée."
+                    if policy.get("block_during_validity")
+                    else f"Usage limité : {self._format_duration(policy['limit_seconds'])}."
+                )
                 self.notification_requested.emit(
                     f"{label} — Usage Guard",
-                    f"Usage limité : {self._format_duration(policy['limit_seconds'])}.",
+                    message,
                     process_id,
                 )
         self.target_key = target_key
@@ -732,7 +756,7 @@ class AppLimiter(QObject):
         if playback:
             self._playing_seen_at[target_key] = time.monotonic()
         state = self.usage.app_limit_state_for_day(target_key)
-        allowed = policy["limit_seconds"] + (
+        allowed = 0 if policy.get("block_during_validity") else policy["limit_seconds"] + (
             policy["extension_seconds"] if state["extension_used"] else 0
         )
         cutoff_block_token = (target_key, f"cutoff-block:{date.today().isoformat()}")
@@ -878,6 +902,8 @@ class AppLimiter(QObject):
     def grant_web_extension(self, target_key):
         if target_key not in self.policies or not target_key.startswith(("site:", "category:")):
             return False
+        if self.policies[target_key].get("block_during_validity"):
+            return False
         granted = self.usage.grant_app_limit_extension(target_key)
         if granted:
             self._warning_shown = {
@@ -941,7 +967,7 @@ class AppLimiter(QObject):
     def current_status(self, target_key):
         policy = self.policies[target_key]
         state = self.usage.app_limit_state_for_day(target_key)
-        allowed = policy["limit_seconds"] + (
+        allowed = 0 if policy.get("block_during_validity") else policy["limit_seconds"] + (
             policy["extension_seconds"] if state["extension_used"] else 0
         )
         duration_remaining = max(0.0, allowed - state["seconds"])
@@ -980,36 +1006,44 @@ class AppLimiter(QObject):
                 date.fromisoformat(valid_until),
                 datetime.strptime(valid_until_time, "%H:%M").time(),
             ).replace(tzinfo=now.tzinfo)
-            if now > validity_end:
+            if now >= validity_end:
                 return {"active": False, "pending": False}
         if not selected_date and not start_text:
             return {"active": True, "pending": False}
-        if selected_date:
-            day = date.fromisoformat(selected_date)
-            if now.date() < day:
-                return {"active": False, "pending": True}
-            if now.date() > day:
-                return {"active": False, "pending": False}
         if not start_text:
             return {"active": True, "pending": False}
-        start = datetime.combine(
-            now.date(), datetime.strptime(start_text, "%H:%M").time()
-        ).replace(tzinfo=now.tzinfo)
-        end = datetime.combine(
-            now.date(), datetime.strptime(end_text, "%H:%M").time()
-        ).replace(tzinfo=now.tzinfo)
-        active = start <= now < end
-        if active:
-            pending = False
-        elif now < start:
-            pending = True
-        elif selected_date or (
-            valid_until and now.date() >= date.fromisoformat(valid_until)
-        ):
-            pending = False
+        start_time = datetime.strptime(start_text, "%H:%M").time()
+        end_time = datetime.strptime(end_text, "%H:%M").time()
+        crosses_midnight = end_time < start_time
+        if selected_date:
+            occurrence_days = [date.fromisoformat(selected_date)]
         else:
-            pending = True
-        return {"active": active, "pending": pending}
+            occurrence_days = [now.date()]
+            if crosses_midnight:
+                occurrence_days.insert(0, now.date() - timedelta(days=1))
+        windows = []
+        for occurrence_day in occurrence_days:
+            start = datetime.combine(occurrence_day, start_time).replace(tzinfo=now.tzinfo)
+            end = datetime.combine(
+                occurrence_day + timedelta(days=1) if crosses_midnight else occurrence_day,
+                end_time,
+            ).replace(tzinfo=now.tzinfo)
+            windows.append((start, end))
+            if start <= now < end:
+                return {"active": True, "pending": False}
+        if selected_date:
+            return {"active": False, "pending": now < windows[0][0]}
+        next_start = datetime.combine(now.date(), start_time).replace(tzinfo=now.tzinfo)
+        if next_start <= now:
+            next_start += timedelta(days=1)
+        if valid_until:
+            validity_end = datetime.combine(
+                date.fromisoformat(valid_until),
+                datetime.strptime(valid_until_time, "%H:%M").time(),
+            ).replace(tzinfo=now.tzinfo)
+            if next_start >= validity_end:
+                return {"active": False, "pending": False}
+        return {"active": False, "pending": True}
 
     @staticmethod
     def _cutoff_remaining(policy, now=None):
@@ -1051,7 +1085,10 @@ class AppLimiter(QObject):
         state = self.usage.app_limit_state_for_day(self.target_key)
         policy = self.policies[self.target_key]
         self.overlay.configure(
-            self.target_label, not state["extension_used"], policy["extension_seconds"]
+            self.target_label,
+            not state["extension_used"] and not policy.get("block_during_validity"),
+            policy["extension_seconds"],
+            bool(policy.get("block_during_validity")),
         )
         self.position_overlay()
         self.overlay.show()
@@ -1068,7 +1105,11 @@ class AppLimiter(QObject):
         )
 
     def grant_extension(self):
-        if not self.target_key or not self.usage.grant_app_limit_extension(self.target_key):
+        if (
+            not self.target_key
+            or self.policies.get(self.target_key, {}).get("block_during_validity")
+            or not self.usage.grant_app_limit_extension(self.target_key)
+        ):
             return
         self._warning_shown = {
             token for token in self._warning_shown

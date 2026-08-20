@@ -2,7 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -256,10 +256,16 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
                 store.set_app_limit_settings("app:test", {
                     **settings, "blocked_after": "", "schedule_end": "",
                 })
-            with self.assertRaisesRegex(ValueError, "après son début"):
+            overnight = store.set_app_limit_settings("app:test", {
+                **settings, "blocked_after": "",
+                "schedule_start": "20:00", "schedule_end": "18:00",
+            })
+            self.assertEqual(overnight["schedule_start"], "20:00")
+            self.assertEqual(overnight["schedule_end"], "18:00")
+            with self.assertRaisesRegex(ValueError, "différentes"):
                 store.set_app_limit_settings("app:test", {
                     **settings, "blocked_after": "",
-                    "schedule_start": "20:00", "schedule_end": "18:00",
+                    "schedule_start": "20:00", "schedule_end": "20:00",
                 })
             with self.assertRaisesRegex(ValueError, "fin de validité"):
                 store.set_app_limit_settings("app:test", {
@@ -267,6 +273,32 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
                     "valid_from_time": "09:30",
                     "valid_until": "2026-08-25",
                     "valid_until_time": "21:15",
+                })
+
+    def test_period_block_is_persisted_without_extension_or_daily_schedule(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            settings = store.set_app_limit_settings("app:test", {
+                "block_during_validity": True,
+                "limit_seconds": 3600,
+                "extension_seconds": 900,
+                "warning_seconds": 300,
+                "valid_from": "2026-08-15", "valid_from_time": "18:00",
+                "valid_until": "2026-08-15", "valid_until_time": "20:00",
+                "blocked_after": "23:00",
+                "schedule_start": "09:00", "schedule_end": "17:00",
+            })
+
+            self.assertTrue(settings["block_during_validity"])
+            self.assertEqual(settings["extension_seconds"], 0)
+            self.assertEqual(settings["blocked_after"], "")
+            self.assertEqual(settings["schedule_start"], "")
+            self.assertEqual(settings["schedule_end"], "")
+            self.assertTrue(store.app_limit_settings("app:test")["block_during_validity"])
+
+            with self.assertRaisesRegex(ValueError, "borne datée"):
+                store.set_app_limit_settings("app:test", {
+                    "block_during_validity": True,
                 })
 
     def test_cutoff_remaining_is_computed_for_the_current_day(self):
@@ -398,10 +430,13 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             )
             self.assertEqual((end - start).total_seconds(), 5400)
 
-            with self.assertRaisesRegex(ValueError, "après l’heure de début"):
-                store.set_computer_block(
-                    "range", start_time="12:00", end_time="11:00", now=now,
-                )
+            overnight_range = store.set_computer_block(
+                "range", start_time="23:00", end_time="00:00", now=now,
+            )
+            overnight_start = datetime.fromisoformat(overnight_range["started_at"])
+            overnight_end = datetime.fromisoformat(overnight_range["ends_at"])
+            self.assertEqual(overnight_start.hour, 23)
+            self.assertEqual(overnight_end.date(), overnight_start.date() + timedelta(days=1))
 
             recurring = store.set_computer_block(
                 "schedule", start_time="18:00", end_time="20:00",
@@ -414,6 +449,16 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertEqual(recurring["valid_from_time"], "09:30")
             self.assertEqual(recurring["valid_until"], "2026-08-20")
             self.assertEqual(recurring["valid_until_time"], "21:15")
+
+            overnight = store.set_computer_block(
+                "schedule", start_time="23:00", end_time="00:00", now=now,
+            )
+            self.assertEqual(overnight["daily_start"], "23:00")
+            self.assertEqual(overnight["daily_end"], "00:00")
+            self.assertEqual(
+                datetime.fromisoformat(overnight["ends_at"]).date(),
+                datetime.fromisoformat(overnight["started_at"]).date() + timedelta(days=1),
+            )
 
             with self.assertRaisesRegex(ValueError, "déjà passé"):
                 store.set_computer_block("day", day="2026-08-14", now=now)

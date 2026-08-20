@@ -192,3 +192,9 @@ msgstr "Remove restriction"
 
 msgid "Blocage actif jusqu’au {time}."
 msgstr "Restriction active until {time}."
+
+msgid "{label} est bloquée pendant la période planifiée."
+msgstr "{label} is blocked during the scheduled period."
+
+msgid "Utilisation interdite pendant la période planifiée."
+msgstr "Usage is blocked during the scheduled period."

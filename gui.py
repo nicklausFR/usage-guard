@@ -64,6 +64,7 @@ class TrayProgressCard(QWidget):
             "QLabel#cardSubtitle { color:#98aaa1; }"
             "QLabel#limitName { color:#eaf2ee; font-weight:600; }"
             "QLabel#limitTime { color:#9fb0a8; }"
+            "QLabel#limitRemaining { color:#f1f6f3; font-size:15px; font-weight:700; }"
             "QProgressBar { height:7px; border:0; border-radius:3px; background:#303934; }"
             "QProgressBar::chunk { border-radius:3px; background:#58d69a; }"
         )
@@ -100,10 +101,15 @@ class TrayProgressCard(QWidget):
             if not policy.get("enabled", True):
                 continue
             status = self.service.app_limiter.current_status(key)
-            if not status.get("schedule_active", True):
+            temporal = bool(policy.get("block_during_validity"))
+            if not status.get("schedule_active", True) and not (
+                temporal and status.get("schedule_pending")
+            ):
                 continue
             entries.append({
                 "label": self.service.app_limiter.label_for_key(key),
+                "temporal": temporal,
+                "policy": policy,
                 **status,
             })
         entries.sort(
@@ -123,44 +129,102 @@ class TrayProgressCard(QWidget):
         self.empty_state.setVisible(not has_limits)
         self.rows_widget.setVisible(has_limits)
 
-        if computer_visible:
+        def add_temporal_row(
+            label, starts_at, ends_at, range_text, active, pending,
+            show_progress=True,
+        ):
+            now = datetime.now().astimezone()
             row = QWidget()
-            row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(0, 4, 0, 2)
-            name = QLabel(_("Tout l’ordinateur"))
+            row_layout = QVBoxLayout(row)
+            row_layout.setContentsMargins(0, 4, 0, 0)
+            row_layout.setSpacing(3)
+            heading = QHBoxLayout()
+            name = QLabel(str(label))
             name.setObjectName("limitName")
-            try:
-                start = datetime.fromisoformat(str(computer_status["started_at"]))
-                end = datetime.fromisoformat(str(computer_status["ends_at"]))
-                if computer_status.get("active"):
-                    status_text = _("actif jusqu’à {time}").format(
-                        time=end.astimezone().strftime("%H:%M")
-                    )
-                elif computer_status.get("pending"):
-                    status_text = _("prévu de {start} à {end}").format(
-                        start=start.astimezone().strftime("%H:%M"),
-                        end=end.astimezone().strftime("%H:%M"),
-                    )
-                else:
-                    status_text = _("hors plage · {start}–{end}").format(
-                        start=str(computer_status.get("daily_start") or start.astimezone().strftime("%H:%M")),
-                        end=str(computer_status.get("daily_end") or end.astimezone().strftime("%H:%M")),
-                    )
-            except (KeyError, TypeError, ValueError):
-                start = str(computer_status.get("daily_start") or "")
-                end = str(computer_status.get("daily_end") or "")
-                status_text = (
-                    _("active") if computer_status.get("active")
-                    else _("hors plage · {start}–{end}").format(start=start, end=end)
-                    if start and end else _("configurée")
-                )
-            detail = QLabel(status_text)
+            remaining_seconds = None
+            if active and ends_at:
+                remaining_seconds = max(0.0, (ends_at - now).total_seconds())
+            elif pending and starts_at:
+                remaining_seconds = max(0.0, (starts_at - now).total_seconds())
+            remaining = QLabel(
+                _("reste {duration}").format(duration=_compact_duration(remaining_seconds))
+                if remaining_seconds is not None else _("configurée")
+            )
+            remaining.setObjectName("limitRemaining")
+            heading.addWidget(name, 1)
+            heading.addWidget(remaining)
+            detail = QLabel(range_text)
             detail.setObjectName("limitTime")
-            row_layout.addWidget(name, 1)
+            row_layout.addLayout(heading)
+            if show_progress:
+                progress = QProgressBar()
+                if starts_at and ends_at:
+                    total_seconds = max(1, int(round((ends_at - starts_at).total_seconds())))
+                    elapsed_seconds = (
+                        max(0, int(round((now - starts_at).total_seconds())))
+                        if active else total_seconds if not pending else 0
+                    )
+                    progress.setRange(0, total_seconds)
+                    progress.setValue(min(total_seconds, elapsed_seconds))
+                else:
+                    progress.setRange(0, 0)
+                progress.setTextVisible(False)
+                row_layout.addWidget(progress)
             row_layout.addWidget(detail)
             self.rows.addWidget(row)
 
+        if computer_visible:
+            starts_at = ends_at = None
+            try:
+                starts_at = datetime.fromisoformat(str(computer_status["started_at"]))
+                ends_at = datetime.fromisoformat(str(computer_status["ends_at"]))
+            except (KeyError, TypeError, ValueError):
+                pass
+            daily_start = str(computer_status.get("daily_start") or "")
+            daily_end = str(computer_status.get("daily_end") or "")
+            if daily_start and daily_end:
+                range_text = f"{daily_start}–{daily_end}"
+            elif starts_at and ends_at:
+                range_text = (
+                    f"{starts_at.astimezone().strftime('%d/%m/%Y %H:%M')}–"
+                    f"{ends_at.astimezone().strftime('%d/%m/%Y %H:%M')}"
+                )
+            else:
+                range_text = _("configurée")
+            add_temporal_row(
+                _("Tout l’ordinateur"), starts_at, ends_at, range_text,
+                bool(computer_status.get("active")), bool(computer_status.get("pending")),
+                show_progress=computer_status.get("mode") != "schedule",
+            )
+
         for entry in entries[:5]:
+            if entry.get("temporal"):
+                policy = entry["policy"]
+                starts_at = ends_at = None
+                try:
+                    if policy.get("valid_from"):
+                        starts_at = datetime.combine(
+                            date.fromisoformat(str(policy["valid_from"])),
+                            datetime.strptime(str(policy["valid_from_time"]), "%H:%M").time(),
+                        ).astimezone()
+                    if policy.get("valid_until"):
+                        ends_at = datetime.combine(
+                            date.fromisoformat(str(policy["valid_until"])),
+                            datetime.strptime(str(policy["valid_until_time"]), "%H:%M").time(),
+                        ).astimezone()
+                except (TypeError, ValueError):
+                    starts_at = ends_at = None
+                boundaries = []
+                if starts_at:
+                    boundaries.append(starts_at.strftime("%d/%m/%Y %H:%M"))
+                if ends_at:
+                    boundaries.append(ends_at.strftime("%d/%m/%Y %H:%M"))
+                add_temporal_row(
+                    entry["label"], starts_at, ends_at,
+                    "–".join(boundaries) or _("configurée"),
+                    bool(entry.get("schedule_active")), bool(entry.get("schedule_pending")),
+                )
+                continue
             row = QWidget()
             row_layout = QVBoxLayout(row)
             row_layout.setContentsMargins(0, 4, 0, 0)
@@ -177,9 +241,15 @@ class TrayProgressCard(QWidget):
             progress.setRange(0, allowed_seconds)
             progress.setValue(min(allowed_seconds, int(round(float(entry["seconds"])))))
             progress.setTextVisible(False)
-            detail = QLabel(
+            detail_parts = [
                 f"{_compact_duration(entry['seconds'])} / {_compact_duration(entry['allowed'])}"
-            )
+            ]
+            policy = entry.get("policy", {})
+            if policy.get("schedule_start") and policy.get("schedule_end"):
+                detail_parts.append(
+                    f"{policy['schedule_start']}–{policy['schedule_end']}"
+                )
+            detail = QLabel(" · ".join(detail_parts))
             detail.setObjectName("limitTime")
             row_layout.addLayout(heading)
             row_layout.addWidget(progress)

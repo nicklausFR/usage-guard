@@ -148,7 +148,7 @@ function renderLimit(state) {
   ui.overlay.style.display = blocked ? "block" : "none";
   ui.bonus.disabled = false;
   ui.bonus.textContent = tr("getExtension", formatDuration(state.extension_seconds));
-  ui.bonus.style.display = blocked && !state.extension_used ? "inline-block" : "none";
+  ui.bonus.style.display = blocked && !state.extension_used && Number(state.extension_seconds) > 0 ? "inline-block" : "none";
 }
 
 function notifyUsageGuard() {
