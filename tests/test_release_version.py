@@ -30,19 +30,23 @@ APP = 'navigator.serviceWorker.register("service-worker.js?v=59")'
 
 
 class ReleaseVersionTest(unittest.TestCase):
+    def _deployment_script(self):
+        path = Path(__file__).parents[1] / "usage_guard_backend" / "deploy-server.ps1"
+        if not path.is_file():
+            self.skipTest(
+                "The private infrastructure deployment script is not distributed."
+            )
+        return path.read_text(encoding="utf-8")
+
     def test_deploy_script_reports_release_errors_without_a_powershell_stack(self):
-        script = (Path(__file__).parents[1] / "usage_guard_backend" / "deploy-server.ps1").read_text(encoding="utf-8")
+        script = self._deployment_script()
         self.assertIn("function Stop-Deployment", script)
         self.assertIn("ECHEC DU DEPLOIEMENT", script)
         self.assertIn("longueur actuelle", script)
         self.assertIn("Invoke-ReleaseVersion", script)
 
     def test_deploy_keeps_only_five_automatic_database_backups(self):
-        script = (
-            Path(__file__).parents[1]
-            / "usage_guard_backend"
-            / "deploy-server.ps1"
-        ).read_text(encoding="utf-8")
+        script = self._deployment_script()
         self.assertIn("[int]$BackupRetentionCount = 5", script)
         self.assertIn("prune_server_backups.py", script)
         self.assertIn("--keep $BackupRetentionCount --protect '$backupFile' --apply", script)
