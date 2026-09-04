@@ -1,129 +1,186 @@
 # Usage Guard
 
-Usage Guard is a Windows activity monitor and usage-control application.
-It records application, website, media, and Windows-session activity, then
-applies configurable usage limits locally.
+Usage Guard is a Windows activity monitor and usage-control application. It
+records application, website, media, and Windows-session activity, then
+applies configurable warnings and limits.
 
-The monitored computer remains the source of truth. A local PWA provides the
-main interface, while an optional authenticated backend enables remote access
-without exposing an inbound port on the monitored computer.
+It can connect one or more monitored computers to an authenticated backend.
+Client connections are outbound, so monitored computers do not need to expose
+an inbound Internet port. A local-backend installation profile is also
+available.
+
+## Project status
+
+Usage Guard is a **functional beta**. Its principal monitoring, analysis,
+policy, notification, multi-computer, installation, and update workflows work
+and have substantial automated test coverage.
+
+It does **not** yet have the robustness, field validation, support guarantees,
+or security hardening expected from a finished consumer product. In
+particular, the fully local deployment mode has not yet been tested end to end
+on a clean Windows installation. Use the project for evaluation and controlled
+testing, not as the only safety or parental-control mechanism on a computer.
+
+The current security model is designed to resist ordinary actions by a
+standard Windows user. It does not claim to withstand a local administrator,
+offline disk access, or modification of the operating system.
 
 ## Main features
 
-- Tracks the active Windows application.
-- Tracks active browser websites through the browser extension.
-- Records background media separately from active usage.
-- Displays the current session and detailed timelines.
-- Provides daily, ranged, and all-time analysis, including Windows-session
-  start times, end times, durations, and daily averages.
+- Tracks the active Windows application and Windows sessions.
+- Tracks active websites through the bundled browser extension.
+- Records background media separately from foreground usage.
+- Displays current activity and detailed timelines.
+- Provides daily, ranged, and all-time analysis.
 - Organises applications and websites in hierarchical categories.
-- Supports renaming, merging, excluding, and reordering activities.
+- Supports renaming, merging, excluding, reordering, and deleting activities.
 - Groups private-browser activity without exposing individual visited sites.
-- Offers French and English interfaces.
+- Applies warnings and blocking rules to computers, categories, applications,
+  and websites.
+- Synchronises user policies across enrolled computers.
+- Delivers signed, user-triggered Windows client updates.
+- Provides French and English user interfaces.
 
-## Usage limits
+## Limits and notifications
 
-Limits can target:
+A rule can target the entire computer, a category and its contents, one
+application, or one website. Rules can define a daily quota, a daily time
+window, a one-time block, a permanent validity period, or exact start and end
+dates. They can also provide warning periods and exceptional extensions.
 
-- the entire computer;
-- a category and its contents;
-- a specific application;
-- a specific website.
+Notification rules can cover application starts, policy changes, approaching
+or exceeded limits, usage-duration thresholds, time-of-day thresholds, PWA
+logins, and monitored-computer connection changes. Notifications can use the
+Windows notification system, email, or both.
 
-Each limit can define:
+## Architecture
 
-- an allowed daily usage duration;
-- a daily start and end time;
-- an optional blocking time;
-- a permanent validity period;
-- or precise start and expiry dates with times;
-- an exceptional extension duration;
-- a warning before the allowed time ends.
+The production Windows client is split into two main processes:
 
-New limits are active immediately. They can later be enabled, disabled,
-edited, reset, or removed. A disabled rule remains stored. A date-bound rule
-is removed only after its configured expiry has passed.
+- a protected Windows service owns policy state, counters, backend
+  communication, and allow/block decisions;
+- a desktop process observes the interactive session and provides the system
+  tray, local PWA, notifications, and blocking overlays.
 
-## Notifications
+The browser extension is only a sensor and presentation bridge. It cannot
+grant extensions, reset counters, or weaken a policy by itself.
 
-Notification rules can cover:
+The backend stores accounts, device identities, policy state, delivery status,
+and remote activity data. Device secrets and email-transport credentials are
+kept out of the PWA and are excluded from the repository.
 
-- the start of any limited application;
-- the addition, modification, or removal of a limit;
-- one or more warnings before a limit;
-- changes to a whole-computer limitation;
-- a successful remote PWA login;
-- connection and disconnection of the monitored computer;
-- a limit being exceeded, including after an exceptional extension;
-- a usage-duration threshold;
-- a configured time-of-day threshold.
-
-Threshold notifications can target the entire computer, a category, an
-application, or a website. Each rule can use a Windows notification, an email,
-or both. Email transport is configured privately in the local settings; each
-user supplies their own recipient address when creating an email rule. Remote
-users see only their own notification rules.
-
-## Interfaces
-
-The Windows process runs in the system tray and performs monitoring and limit
-enforcement. Its tray tooltip lists the limitations relevant today.
-
-The local PWA is opened from the tray icon and provides activity, analysis,
-limit, notification, category, and user-management views.
-
-The remote PWA uses authenticated accounts with separate permissions for
-viewing and managing activity, limits, and notifications. Administrators can
-manage remote users and their access rights. The current model supports one
-monitored computer shared by several PWA accounts.
-
-## Browser extension
-
-The browser extension reports the active tab, website, and browser media state
-to the Windows client. This is required for accurate per-site tracking and
-website limits. The extension acts only as a sensor and display bridge: limit
-decisions, counters, and exceptional extensions remain controlled by Usage
-Guard on the monitored computer.
-
-## Data and remote access
-
-Primary usage data and enforcement state are stored on the monitored computer.
-The Windows client sends snapshots to the optional backend and polls it for
-authorised commands. All client-to-backend connections are outbound HTTPS.
-
-The backend stores remote accounts, the latest device snapshot, and queued
-commands. Commands created while the computer is offline remain visible and
-are delivered when it reconnects. Device credentials and email-transport
-secrets are never exposed to PWA users or committed to the repository.
+See [the architecture reference](docs/architecture.md) for the trust model and
+remaining hardening work.
 
 ## Requirements
 
 - Windows 10 or later;
-- Python 3.11 or later for source builds;
-- [ActivityWatch](https://activitywatch.net/);
-- the ActivityWatch browser extension for website detection;
-- PySide6 and the packages listed in `requirements.txt`.
+- Python 3.11 or later for source-based development;
+- [ActivityWatch](https://activitywatch.net/) when its optional integration is
+  enabled;
+- the dependencies listed in `requirements.txt`.
+
+The production installer and client-update packages require additional build
+tools listed in `requirements-build.txt`.
+
+## Run from source for development
+
+Use the isolated development profile. It has separate data, ports, mutexes,
+and browser-extension settings, and it does not change Windows autostart or
+connect to the configured production backend.
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py --profile dev
+```
+
+The development PWA is then available at `http://127.0.0.1:18766`. Build the
+matching development browser extension with:
+
+```powershell
+.\.venv\Scripts\python.exe tools\build_dev_extension.py
+```
+
+Load `build\browser-extension-dev` as an unpacked extension in Brave or
+Chromium. The production extension uses port `8765`; the development extension
+uses port `18765`.
+
+Running `python main.py` without `--profile dev` selects the production profile
+and expects the protected Windows service. It is not the recommended way to
+start a source checkout.
+
+## Production installation
+
+Production installations are created as signed release artifacts, not by
+copying a source checkout into `Program Files`. The installer offers two
+profiles:
+
+1. install a backend on the same computer;
+2. enrol the computer with an existing HTTPS backend.
+
+The first profile is the currently unvalidated fully local mode described in
+the project-status section. The connected profile requires an administrator
+account on the target backend and explicitly maps Windows accounts to Usage
+Guard users.
+
+The bundled Browser Bridge must be loaded in each monitored browser profile.
+See [the browser-extension guide](browser_extension/README.md).
+
+## Versioning
+
+The project intentionally uses two independent release numbers:
+
+- `client_version.py` defines the signed Windows client package version;
+- the last release entry in `CHANGELOG.md` defines the backend/PWA asset and
+  cache version.
+
+The current source tree uses client version `1.020` and PWA/backend version
+`1.132`. Earlier `2.xxx` entries were pre-stable development builds; the public
+stable line restarted at `1.000`.
+
+## Quality checks
+
+Run the same checks as the GitHub CI workflow before submitting a change:
+
+```powershell
+node --check .\pwa\app.js
+node --check .\browser_extension\background.js
+node --check .\browser_extension\content.js
+node --check .\browser_extension\options.js
+python .\tools\audit_i18n.py
+node .\tools\check_pwa_i18n.js
+python -B -m unittest discover -s tests
+```
+
+Together, the translation checks cover desktop gettext messages, static and
+dynamic PWA text, backend errors displayed by the PWA, and the
+browser-extension locale catalogues.
+
+## Releases
+
+The `CI` workflow runs syntax, translation, and test checks on pushes and pull
+requests. The separate `Client Windows release` workflow is manual and requires
+repository secrets for Authenticode signing and optional backend publication.
+Publication is disabled by default.
+
+Generated installers, ZIP files, manifests, databases, credentials, local
+configuration, and operational notes are excluded from Git. Release binaries
+belong in GitHub Releases or CI artifacts, never in the source history.
 
 ## Project structure
 
-- `main.py`: Windows application entry point.
+- `main.py`: Windows desktop entry point.
+- `decision_service.py`: protected decision-service protocol and runtime.
 - `guard.py`: activity aggregation and command handling.
-- `usage_guard.py`: persistent usage, limit, and notification data.
+- `usage_guard.py`: persistent usage, policy, and notification logic.
 - `app_limiter.py`: local enforcement and blocking overlays.
-- `pwa/`: local and remote web interface sources.
-- `usage_guard_backend/`: authenticated remote backend and deployment tools.
-- `browser_extension/`: browser activity bridge.
+- `pwa/`: local and remote web-interface sources.
+- `usage_guard_backend/`: authenticated backend.
+- `browser_extension/`: browser activity and limit bridge.
+- `tools/`: build, installation, enrolment, migration, and release tools.
 - `tests/`: automated test suite.
-
-## Future architecture
-
-The planned hardened design separates the trusted policy service from the
-desktop interface and browser sensors. It introduces protected storage, a
-restricted local IPC protocol, service supervision, and managed browser
-integration.
-
-See [docs/architecture.md](docs/architecture.md) for the target architecture
-and migration sequence.
 
 ## License
 

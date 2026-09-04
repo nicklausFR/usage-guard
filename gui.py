@@ -1,7 +1,6 @@
 from datetime import date, datetime, timedelta
 import os
 import sys
-import winreg
 
 from PySide6.QtCore import QDate, QMimeData, QPoint, QTimer, Qt, QSize, Signal
 from PySide6.QtGui import QAction, QColor, QCursor, QDrag, QIcon, QPainter, QPixmap
@@ -26,6 +25,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from i18n import _, language_preference, save_language_preference
+from command_policy import is_backend_managed
+from runtime_profile import current_profile
 
 from usage_guard import computer_on_seconds_today, config, debug_log
 
@@ -33,6 +34,9 @@ from usage_guard import computer_on_seconds_today, config, debug_log
 _DURATION_SECONDS_ROLE = Qt.UserRole + 3
 _UNCATEGORIZED_LABEL = "Applications non classées"
 _LIMIT_TARGET_MIME = "application/x-usage-guard-limit-target"
+_COUNTDOWN_OK_COLOR = "#58d69a"
+_COUNTDOWN_WARNING_COLOR = "#f59e0b"
+_COUNTDOWN_EXPIRED_COLOR = "#ef6b73"
 
 
 def _compact_duration(seconds):
@@ -44,6 +48,137 @@ def _compact_duration(seconds):
     if minutes:
         return f"{minutes} min {seconds:02d} s"
     return f"{seconds} s"
+
+
+def _countdown_color(remaining_seconds, total_seconds=None, warning=False):
+    """Use the tray progress palette for countdown-only limits too."""
+    if remaining_seconds is None:
+        return "#9fb0a8"
+    remaining_seconds = max(0.0, float(remaining_seconds))
+    if remaining_seconds <= 0:
+        return _COUNTDOWN_EXPIRED_COLOR
+    total_seconds = max(0.0, float(total_seconds or 0))
+    if warning or (total_seconds and remaining_seconds / total_seconds <= .1):
+        return _COUNTDOWN_WARNING_COLOR
+    return _COUNTDOWN_OK_COLOR
+
+
+def _today_temporal_bounds(policy, now, active=False, pending=False):
+    """Return the current day's occurrence of a recurring temporal limit."""
+    day_start = datetime.combine(now.date(), datetime.min.time()).replace(
+        tzinfo=now.tzinfo
+    )
+    day_end = day_start + timedelta(days=1)
+
+    def boundary(day_key, time_key, fallback):
+        day_text = str(policy.get(day_key, "") or "").strip()
+        if not day_text:
+            return None
+        time_text = str(policy.get(time_key, "") or fallback).strip() or fallback
+        return datetime.combine(
+            date.fromisoformat(day_text),
+            datetime.strptime(time_text, "%H:%M").time(),
+        ).replace(tzinfo=now.tzinfo)
+
+    try:
+        validity_start = boundary("valid_from", "valid_from_time", "00:00")
+        validity_end = boundary("valid_until", "valid_until_time", "23:59")
+        schedule_start = str(policy.get("schedule_start", "") or "").strip()
+        schedule_end = str(policy.get("schedule_end", "") or "").strip()
+        if schedule_start and schedule_end:
+            start_time = datetime.strptime(schedule_start, "%H:%M").time()
+            end_time = datetime.strptime(schedule_end, "%H:%M").time()
+            crosses_midnight = end_time < start_time
+            windows = []
+            occurrence_days = [now.date()]
+            if crosses_midnight:
+                occurrence_days.insert(0, now.date() - timedelta(days=1))
+            for occurrence_day in occurrence_days:
+                starts_at = datetime.combine(occurrence_day, start_time).replace(
+                    tzinfo=now.tzinfo
+                )
+                ends_at = datetime.combine(
+                    occurrence_day + timedelta(days=1)
+                    if crosses_midnight else occurrence_day,
+                    end_time,
+                ).replace(tzinfo=now.tzinfo)
+                starts_at = max(starts_at, validity_start or starts_at)
+                ends_at = min(ends_at, validity_end or ends_at)
+                if starts_at < ends_at and starts_at < day_end and ends_at > day_start:
+                    windows.append((starts_at, ends_at))
+            if active:
+                return next(
+                    ((start, end) for start, end in windows if start <= now < end),
+                    (None, None),
+                )
+            if pending:
+                return next(
+                    ((start, end) for start, end in windows if now < start),
+                    (None, None),
+                )
+            return None, None
+
+        starts_at = max(day_start, validity_start or day_start)
+        ends_at = min(day_end, validity_end or day_end)
+        if starts_at < ends_at and (
+            active or (pending and now < starts_at)
+        ):
+            return starts_at, ends_at
+    except (TypeError, ValueError):
+        pass
+    return None, None
+
+
+def _temporal_overlaps_today(policy, now):
+    """Whether a temporal limit has an occurrence in the local current day."""
+    day_start = datetime.combine(now.date(), datetime.min.time()).replace(
+        tzinfo=now.tzinfo
+    )
+    day_end = day_start + timedelta(days=1)
+
+    def boundary(day_key, time_key, fallback):
+        day_text = str(policy.get(day_key, "") or "").strip()
+        if not day_text:
+            return None
+        time_text = str(policy.get(time_key, "") or fallback).strip() or fallback
+        return datetime.combine(
+            date.fromisoformat(day_text),
+            datetime.strptime(time_text, "%H:%M").time(),
+        ).replace(tzinfo=now.tzinfo)
+
+    try:
+        validity_start = boundary("valid_from", "valid_from_time", "00:00")
+        validity_end = boundary("valid_until", "valid_until_time", "23:59")
+        if validity_start and validity_start >= day_end:
+            return False
+        if validity_end and validity_end <= day_start:
+            return False
+        schedule_start = str(policy.get("schedule_start", "") or "").strip()
+        schedule_end = str(policy.get("schedule_end", "") or "").strip()
+        if not schedule_start or not schedule_end:
+            return True
+        start_time = datetime.strptime(schedule_start, "%H:%M").time()
+        end_time = datetime.strptime(schedule_end, "%H:%M").time()
+        crosses_midnight = end_time < start_time
+        occurrence_days = [now.date()]
+        if crosses_midnight:
+            occurrence_days.insert(0, now.date() - timedelta(days=1))
+        for occurrence_day in occurrence_days:
+            starts_at = datetime.combine(occurrence_day, start_time).replace(
+                tzinfo=now.tzinfo
+            )
+            ends_at = datetime.combine(
+                occurrence_day + timedelta(days=1)
+                if crosses_midnight else occurrence_day,
+                end_time,
+            ).replace(tzinfo=now.tzinfo)
+            starts_at = max(starts_at, validity_start or starts_at)
+            ends_at = min(ends_at, validity_end or ends_at)
+            if starts_at < ends_at and starts_at < day_end and ends_at > day_start:
+                return True
+    except (TypeError, ValueError):
+        return False
+    return False
 
 
 class TrayProgressCard(QWidget):
@@ -64,7 +199,7 @@ class TrayProgressCard(QWidget):
             "QLabel#cardSubtitle { color:#98aaa1; }"
             "QLabel#limitName { color:#eaf2ee; font-weight:600; }"
             "QLabel#limitTime { color:#9fb0a8; }"
-            "QLabel#limitRemaining { color:#f1f6f3; font-size:15px; font-weight:700; }"
+            "QLabel#limitRemaining { color:#58d69a; font-size:15px; font-weight:700; }"
             "QProgressBar { height:7px; border:0; border-radius:3px; background:#303934; }"
             "QProgressBar::chunk { border-radius:3px; background:#58d69a; }"
         )
@@ -96,6 +231,7 @@ class TrayProgressCard(QWidget):
                 widget.setParent(None)
                 widget.deleteLater()
 
+        now = datetime.now().astimezone()
         entries = []
         for key, policy in self.service.app_limiter.policies.items():
             if not policy.get("enabled", True):
@@ -105,6 +241,8 @@ class TrayProgressCard(QWidget):
             configured_schedule = bool(
                 policy.get("schedule_start") and policy.get("schedule_end")
             )
+            if temporal and not _temporal_overlaps_today(policy, now):
+                continue
             if not status.get("schedule_active", True) and not (
                 temporal and status.get("schedule_pending")
             ) and not (
@@ -112,7 +250,8 @@ class TrayProgressCard(QWidget):
             ):
                 continue
             entries.append({
-                "label": self.service.app_limiter.label_for_key(key),
+                "label": str(policy.get("name") or "").strip()
+                or self.service.app_limiter.label_for_key(key),
                 "temporal": temporal,
                 "configured_schedule": configured_schedule,
                 "policy": policy,
@@ -128,8 +267,33 @@ class TrayProgressCard(QWidget):
         )
         if callable(computer_status_provider):
             computer_status = computer_status_provider()
+        day_start = datetime.combine(now.date(), datetime.min.time()).replace(
+            tzinfo=now.tzinfo
+        )
+        day_end = day_start + timedelta(days=1)
+        computer_starts_at = computer_ends_at = None
+        try:
+            computer_starts_at = datetime.fromisoformat(
+                str(computer_status["started_at"])
+            ).astimezone()
+            computer_ends_at = datetime.fromisoformat(
+                str(computer_status["ends_at"])
+            ).astimezone()
+        except (KeyError, TypeError, ValueError):
+            pass
+        occurrence_today = bool(
+            computer_starts_at and computer_ends_at
+            and computer_starts_at < day_end and computer_ends_at > day_start
+        )
+        recurring_today = bool(
+            computer_status.get("mode") == "schedule"
+            and computer_status.get("daily_start")
+            and computer_status.get("daily_end")
+            and not computer_starts_at and not computer_ends_at
+        )
         computer_visible = bool(
             computer_status.get("enabled") and computer_status.get("mode")
+            and (occurrence_today or recurring_today)
         )
         has_limits = bool(entries) or computer_visible
         self.empty_state.setVisible(not has_limits)
@@ -137,7 +301,7 @@ class TrayProgressCard(QWidget):
 
         def add_temporal_row(
             label, starts_at, ends_at, range_text, active, pending,
-            show_progress=True,
+            show_progress=True, warning=False,
         ):
             now = datetime.now().astimezone()
             row = QWidget()
@@ -157,6 +321,14 @@ class TrayProgressCard(QWidget):
                 if remaining_seconds is not None else _("configurée")
             )
             remaining.setObjectName("limitRemaining")
+            total_seconds = (
+                max(1.0, (ends_at - starts_at).total_seconds())
+                if starts_at and ends_at else None
+            )
+            remaining_color = _countdown_color(
+                remaining_seconds, total_seconds, warning=active or warning,
+            )
+            remaining.setStyleSheet(f"color:{remaining_color};")
             heading.addWidget(name, 1)
             heading.addWidget(remaining)
             detail = QLabel(range_text)
@@ -175,17 +347,16 @@ class TrayProgressCard(QWidget):
                 else:
                     progress.setRange(0, 0)
                 progress.setTextVisible(False)
+                if remaining_color != _COUNTDOWN_OK_COLOR:
+                    progress.setStyleSheet(
+                        f"QProgressBar::chunk {{ background:{remaining_color}; }}"
+                    )
                 row_layout.addWidget(progress)
             row_layout.addWidget(detail)
             self.rows.addWidget(row)
 
         if computer_visible:
-            starts_at = ends_at = None
-            try:
-                starts_at = datetime.fromisoformat(str(computer_status["started_at"]))
-                ends_at = datetime.fromisoformat(str(computer_status["ends_at"]))
-            except (KeyError, TypeError, ValueError):
-                pass
+            starts_at, ends_at = computer_starts_at, computer_ends_at
             daily_start = str(computer_status.get("daily_start") or "")
             daily_end = str(computer_status.get("daily_end") or "")
             if daily_start and daily_end:
@@ -198,28 +369,30 @@ class TrayProgressCard(QWidget):
             else:
                 range_text = _("configurée")
             add_temporal_row(
-                _("Tout l’ordinateur"), starts_at, ends_at, range_text,
+                str(computer_status.get("name") or "").strip()
+                or _("Tout l’ordinateur"), starts_at, ends_at, range_text,
                 bool(computer_status.get("active")), bool(computer_status.get("pending")),
                 show_progress=computer_status.get("mode") != "schedule",
+                warning=bool(
+                    callable(getattr(
+                        self.service.app_limiter,
+                        "computer_block_warning_due",
+                        None,
+                    ))
+                    and self.service.app_limiter.computer_block_warning_due(
+                        computer_status, now,
+                    )
+                ),
             )
 
         for entry in entries[:5]:
             if entry.get("temporal"):
                 policy = entry["policy"]
-                starts_at = ends_at = None
-                try:
-                    if policy.get("valid_from"):
-                        starts_at = datetime.combine(
-                            date.fromisoformat(str(policy["valid_from"])),
-                            datetime.strptime(str(policy["valid_from_time"]), "%H:%M").time(),
-                        ).astimezone()
-                    if policy.get("valid_until"):
-                        ends_at = datetime.combine(
-                            date.fromisoformat(str(policy["valid_until"])),
-                            datetime.strptime(str(policy["valid_until_time"]), "%H:%M").time(),
-                        ).astimezone()
-                except (TypeError, ValueError):
-                    starts_at = ends_at = None
+                starts_at, ends_at = _today_temporal_bounds(
+                    policy, now,
+                    active=bool(entry.get("schedule_active")),
+                    pending=bool(entry.get("schedule_pending")),
+                )
                 boundaries = []
                 if starts_at:
                     boundaries.append(starts_at.strftime("%d/%m/%Y %H:%M"))
@@ -251,12 +424,15 @@ class TrayProgressCard(QWidget):
             name = QLabel(str(entry["label"]))
             name.setObjectName("limitName")
             remaining = QLabel(_("reste {duration}").format(duration=_compact_duration(entry['remaining'])))
-            remaining.setObjectName("limitTime")
+            remaining.setObjectName("limitRemaining")
             allowed_seconds = max(1, int(round(float(entry["allowed"]))))
             low_remaining = float(entry.get("remaining", allowed_seconds)) / max(1.0, float(entry["allowed"])) <= .1
             warning_color = bool(entry.get("extension_used")) or low_remaining
-            if warning_color:
-                remaining.setStyleSheet("color:#f59e0b; font-weight:700;")
+            remaining_color = _countdown_color(
+                entry.get("remaining", allowed_seconds), allowed_seconds,
+                warning=bool(entry.get("extension_used")),
+            )
+            remaining.setStyleSheet(f"color:{remaining_color};")
             heading.addWidget(name, 1)
             heading.addWidget(remaining)
             progress = QProgressBar()
@@ -264,7 +440,9 @@ class TrayProgressCard(QWidget):
             progress.setValue(min(allowed_seconds, int(round(float(entry["seconds"])))))
             progress.setTextVisible(False)
             if warning_color:
-                progress.setStyleSheet("QProgressBar::chunk { background:#f59e0b; }")
+                progress.setStyleSheet(
+                    f"QProgressBar::chunk {{ background:{remaining_color}; }}"
+                )
             detail_parts = [
                 f"{_compact_duration(entry['seconds'])} / {_compact_duration(entry['allowed'])}"
             ]
@@ -710,11 +888,22 @@ def create_tray_icon(toggle_callback, service):
     usage_icon = create_usage_icon()
     app.setWindowIcon(usage_icon)
     icon = QSystemTrayIcon(usage_icon, app)
-    icon.setToolTip(_("Usage Guard — suivi actif"))
+    profile = current_profile()
+    profile_suffix = "" if profile.production else f" · {profile.name.upper()}"
+    icon.setToolTip(_("Usage Guard — suivi actif") + profile_suffix)
     menu = QMenu()
     progress_card = TrayProgressCard(service)
-    open_action = QAction(_("Ouvrir Usage Guard"), icon)
+    open_action = QAction(_("Ouvrir Usage Guard") + profile_suffix, icon)
     open_action.triggered.connect(toggle_callback)
+
+    def open_taskbar_settings():
+        try:
+            os.startfile("ms-settings:taskbar")
+        except OSError as exc:
+            debug_log(f"unable to open taskbar settings: {exc}")
+
+    pin_action = QAction(_("Garder l’icône visible dans la barre"), icon)
+    pin_action.triggered.connect(open_taskbar_settings)
 
     def quit_app():
         icon.hide()
@@ -723,6 +912,7 @@ def create_tray_icon(toggle_callback, service):
     quit_action = QAction(_("Quitter"), icon)
     quit_action.triggered.connect(quit_app)
     menu.addAction(open_action)
+    menu.addAction(pin_action)
     menu.addSeparator()
     menu.addAction(quit_action)
     icon.setContextMenu(menu)
@@ -740,6 +930,8 @@ def create_tray_icon(toggle_callback, service):
     # Keep Python references alive for the lifetime of the tray icon.
     icon._menu = menu
     icon._open_action = open_action
+    icon._pin_action = pin_action
+    icon._open_taskbar_settings = open_taskbar_settings
     icon._quit_action = quit_action
     icon._handle_activation = handle_activation
     icon._normal_icon = usage_icon
@@ -770,9 +962,9 @@ def create_tray_icon(toggle_callback, service):
 
         running = service.app_limiter.running_limits()
         if not running:
-            icon.setToolTip(_("Usage Guard — suivi actif"))
+            icon.setToolTip(_("Usage Guard — suivi actif") + profile_suffix)
             return
-        lines = ["Applications limitées"]
+        lines = [_('Applications limitées')]
         for item in running:
             allowed = max(1.0, float(item["allowed"]))
             used = min(allowed, max(0.0, float(item["seconds"])))
@@ -788,7 +980,7 @@ def create_tray_icon(toggle_callback, service):
     # card. Keeping the old formatter above avoids changing unrelated startup
     # behavior while this local function becomes the connected updater.
     def update_tooltip():
-        icon.setToolTip("")
+        icon.setToolTip(f"Usage Guard{profile_suffix}" if profile_suffix else "")
         if progress_card.isVisible():
             progress_card.refresh()
 
@@ -839,69 +1031,21 @@ def create_tray_icon(toggle_callback, service):
     icon._update_blink = update_blink
     icon._check_hover = check_hover
 
-    def promote_in_windows_settings():
-        """Keep this exact executable visible in the Windows 11 tray."""
-        registry_path = r"Control Panel\NotifyIconSettings"
-        executable = os.path.normcase(os.path.abspath(sys.executable))
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_path) as root:
-                index = 0
-                while True:
-                    try:
-                        child_name = winreg.EnumKey(root, index)
-                    except OSError:
-                        break
-                    index += 1
-                    try:
-                        with winreg.OpenKey(
-                            root,
-                            child_name,
-                            0,
-                            winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE,
-                        ) as child:
-                            registered_path, _ = winreg.QueryValueEx(
-                                child, "ExecutablePath"
-                            )
-                            if os.path.normcase(os.path.abspath(registered_path)) != executable:
-                                continue
-                            winreg.SetValueEx(
-                                child, "IsPromoted", 0, winreg.REG_DWORD, 1
-                            )
-                            debug_log(
-                                "tray icon promoted in Windows notification settings"
-                            )
-                            return
-                    except (OSError, TypeError):
-                        continue
-        except OSError as error:
-            debug_log(f"tray promotion failed: {error!r}")
-
-    # Calling show() again is a no-op while Qt already considers the icon
-    # visible, even when Explorer silently missed the original registration.
-    # Force a genuine removal/addition cycle after the event loop starts.
-    def finish_registration(attempt):
-        icon.setIcon(create_usage_icon())
+    def finish_registration(reason="startup"):
+        """Register once, or restore the icon after Explorer restarted."""
+        icon.setIcon(icon._normal_icon)
         icon.setContextMenu(menu)
         icon.show()
         debug_log(
-            f"tray registration attempt={attempt}; visible={icon.isVisible()}"
+            f"tray registration reason={reason}; visible={icon.isVisible()}"
         )
 
-    def reregister_with_shell(attempt):
+    def reregister_with_shell(reason="explorer-restart"):
         icon.hide()
-        QTimer.singleShot(100, lambda: finish_registration(attempt))
+        QTimer.singleShot(100, lambda: finish_registration(reason))
 
     icon._finish_registration = finish_registration
     icon._reregister_with_shell = reregister_with_shell
-    icon._promote_in_windows_settings = promote_in_windows_settings
-    QTimer.singleShot(600, promote_in_windows_settings)
-    QTimer.singleShot(2_000, promote_in_windows_settings)
-    retry_delays_ms = (250, 1_000, 3_000, 10_000, 30_000)
-    for attempt, delay_ms in enumerate(retry_delays_ms, start=1):
-        QTimer.singleShot(
-            delay_ms,
-            lambda attempt=attempt: reregister_with_shell(attempt),
-        )
     return icon
 
 
@@ -1159,12 +1303,12 @@ class PopupPanel(QWidget):
         if page == 0:
             context = self.service.current_context
             if context.is_afk:
-                status = "En pause — ordinateur inactif"
+                status = _("En pause — ordinateur inactif")
             elif context.app_name:
                 target = self.service.usage.target_for_context(context)
-                status = f"Actif : {_clean_name(target.label)}"
+                status = _("Actif : {name}").format(name=_clean_name(target.label))
             else:
-                status = "En attente d’une application active"
+                status = _("En attente d’une application active")
             self.status_label.setText(status)
 
             usage = self.service.usage.usage_for_day()
@@ -1214,11 +1358,15 @@ class PopupPanel(QWidget):
             if key not in existing
         ]
         if not candidates:
-            QMessageBox.information(self, "Ajouter une limite", "Toutes les applications connues ont déjà une limite.")
+            QMessageBox.information(
+                self,
+                _("Ajouter une limite"),
+                _("Toutes les applications connues ont déjà une limite."),
+            )
             return
         labels = [f"{label}  ({key})" for key, label in candidates]
         selected, accepted = QInputDialog.getItem(
-            self, "Ajouter une limite", "Application :", labels, 0, False
+            self, _("Ajouter une limite"), _("Application :"), labels, 0, False
         )
         if not accepted:
             return
@@ -1259,30 +1407,48 @@ class PopupPanel(QWidget):
     def _edit_selected_limit(self):
         target_key = self._selected_limit_key()
         if target_key:
+            if self._remote_managed_limit(target_key):
+                return
             self._edit_limit(target_key, self.service.app_limiter.policies[target_key])
 
+    def _remote_managed_limit(self, target_key):
+        if (
+            current_profile().production
+            or not is_backend_managed(self.service.app_limiter.policies.get(target_key))
+        ):
+            return False
+        QMessageBox.information(
+            self, _("Limite administrée à distance"),
+            _("Cette limite ne peut être modifiée que depuis l’interface distante."),
+        )
+        return True
+
     def _edit_limit(self, target_key, settings):
-        label = self.service.app_limiter.label_for_key(target_key)
+        label = str(settings.get("name") or "").strip() or self.service.app_limiter.label_for_key(target_key)
         enabled_label, accepted = QInputDialog.getItem(
-            self, f"Limite — {label}", "État :", ["Activée", "Désactivée"],
+            self, _("Limite — {label}").format(label=label), _("État :"),
+            [_('Activée'), _('Désactivée')],
             0 if settings.get("enabled", True) else 1, False,
         )
         if not accepted:
             return
         limit, accepted = QInputDialog.getInt(
-            self, f"Limite — {label}", "Durée autorisée (secondes) :",
+            self, _("Limite — {label}").format(label=label),
+            _("Durée autorisée (secondes) :"),
             int(settings.get("limit_seconds", 15)), 1, 86_400,
         )
         if not accepted:
             return
         extension, accepted = QInputDialog.getInt(
-            self, f"Limite — {label}", "Rallonge exceptionnelle (secondes) :",
+            self, _("Limite — {label}").format(label=label),
+            _("Rallonge exceptionnelle (secondes) :"),
             int(settings.get("extension_seconds", 15)), 1, 3_600,
         )
         if not accepted:
             return
         warning, accepted = QInputDialog.getInt(
-            self, f"Limite — {label}", "Notification avant la fin (secondes) :",
+            self, _("Limite — {label}").format(label=label),
+            _("Notification avant la fin (secondes) :"),
             min(int(settings.get("warning_seconds", 5)), limit), 1, limit,
         )
         if not accepted:
@@ -1292,7 +1458,8 @@ class PopupPanel(QWidget):
             if target_key in self.service.app_limiter.policies else None
         )
         normalized = self.service.app_limiter.apply_settings(target_key, {
-            "enabled": enabled_label == "Activée",
+            **settings,
+            "enabled": enabled_label == _("Activée"),
             "limit_seconds": limit,
             "extension_seconds": extension,
             "warning_seconds": warning,
@@ -1303,17 +1470,21 @@ class PopupPanel(QWidget):
 
     def _reset_selected_limit(self):
         target_key = self._selected_limit_key()
-        if target_key:
+        if target_key and not self._remote_managed_limit(target_key):
             self.service.app_limiter.reset_today(target_key)
             self._refresh_limits(select_key=target_key)
 
     def _remove_selected_limit(self):
         target_key = self._selected_limit_key()
-        if not target_key:
+        if not target_key or self._remote_managed_limit(target_key):
             return
-        label = self.service.app_limiter.label_for_key(target_key)
+        label = str(
+            self.service.app_limiter.policies.get(target_key, {}).get("name")
+            or ""
+        ).strip() or self.service.app_limiter.label_for_key(target_key)
         answer = QMessageBox.question(
-            self, "Supprimer la limite", f"Supprimer la limite de « {label} » ?",
+            self, _("Supprimer la limite"),
+            _("Supprimer la limite de « {label} » ?").format(label=label),
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
@@ -1332,9 +1503,9 @@ class PopupPanel(QWidget):
         for limit in self.service.app_limiter.limits():
             state = f"{_format_seconds(limit['seconds'])} / {_format_seconds(limit['allowed'])}"
             if limit["extension_used"]:
-                state += " — rallonge utilisée"
+                state += _(" — rallonge utilisée")
             item = QTreeWidgetItem([
-                limit["label"],
+                str(limit.get("name") or "").strip() or limit["label"],
                 "",
                 _format_seconds(limit["limit_seconds"]),
                 _format_seconds(limit["extension_seconds"]),
@@ -1346,10 +1517,11 @@ class PopupPanel(QWidget):
             toggle = QPushButton("")
             toggle.setFixedSize(28, 22)
             toggle.setToolTip(
-                "Désactiver cette limite" if limit["enabled"] else "Activer cette limite"
+                _("Désactiver cette limite") if limit["enabled"]
+                else _("Activer cette limite")
             )
             toggle.setAccessibleName(
-                "Limite activée" if limit["enabled"] else "Limite désactivée"
+                _("Limite activée") if limit["enabled"] else _("Limite désactivée")
             )
             toggle.setStyleSheet(
                 "QPushButton { border:1px solid rgba(255,255,255,45); border-radius:7px; "
@@ -1451,11 +1623,21 @@ class PopupPanel(QWidget):
         best_day, best_seconds = max(day_totals, key=lambda item: item[1])
         selection_label = self.analysis_target.currentText()
         self.analysis_summary.setText(
-            f"{period_label} | {selection_label} : {_format_seconds(total_seconds)} | "
-            f"Moyenne/jour : {_format_seconds(total_seconds / len(day_totals))} | "
-            f"Jours actifs : {active_days}/{len(day_totals)} | "
-            f"Maximum : {best_day:%d/%m} ({_format_seconds(best_seconds)}) | "
-            f"Ordinateur : {_format_seconds(system_usage['on'])}"
+            _(
+                "{period} | {selection} : {total} | Moyenne/jour : {average} | "
+                "Jours actifs : {active_days}/{day_count} | Maximum : {best_day} "
+                "({best_duration}) | Ordinateur : {computer_duration}"
+            ).format(
+                period=period_label,
+                selection=selection_label,
+                total=_format_seconds(total_seconds),
+                average=_format_seconds(total_seconds / len(day_totals)),
+                active_days=active_days,
+                day_count=len(day_totals),
+                best_day=best_day.strftime("%d/%m"),
+                best_duration=_format_seconds(best_seconds),
+                computer_duration=_format_seconds(system_usage["on"]),
+            )
         )
         self.analysis_tree.setUpdatesEnabled(False)
         self.analysis_tree.clear()
@@ -1475,7 +1657,9 @@ class PopupPanel(QWidget):
             self.analysis_tree.addTopLevelItem(item)
         inactive_root_entries = [entry for entry in root_entries if entry.seconds <= 0]
         if inactive_root_entries:
-            inactive = QTreeWidgetItem([f"Inactifs ({len(inactive_root_entries)})", ""])
+            inactive = QTreeWidgetItem([
+                _("Inactifs ({count})").format(count=len(inactive_root_entries)), ""
+            ])
             inactive.setData(0, Qt.UserRole + 2, "analysis-inactive:root")
             self.analysis_tree.addTopLevelItem(inactive)
             for entry in inactive_root_entries:
@@ -1506,7 +1690,9 @@ class PopupPanel(QWidget):
                 category_item.addChild(child)
             inactive_entries = [entry for entry in ordered_entries if entry.seconds <= 0]
             if inactive_entries:
-                inactive = QTreeWidgetItem([f"Inactifs ({len(inactive_entries)})", ""])
+                inactive = QTreeWidgetItem([
+                    _("Inactifs ({count})").format(count=len(inactive_entries)), ""
+                ])
                 inactive_identity = f"analysis-inactive:{category}"
                 inactive.setData(0, Qt.UserRole + 2, inactive_identity)
                 category_item.addChild(inactive)
@@ -1633,7 +1819,10 @@ class PopupPanel(QWidget):
                             f"site-category:{name}",
                         )
                     for entry in other_sites:
-                        node = self._tree_item(browser, "Autres sites", entry.seconds, "other-sites", entry.key)
+                        node = self._tree_item(
+                            browser, _("Autres sites"), entry.seconds,
+                            "other-sites", entry.key
+                        )
                         self._add_timed_tree_rows(
                             node,
                             [
@@ -1666,7 +1855,7 @@ class PopupPanel(QWidget):
                         direct_sites.append(
                             type(entry)(
                                 key=entry.key,
-                                label="Brave (sans site identifié)",
+                                label=_("Brave (sans site identifié)"),
                                 category=entry.category,
                                 seconds=entry.seconds,
                                 site_category="",
@@ -1698,7 +1887,10 @@ class PopupPanel(QWidget):
                         f"category:{category}:site-category:{site_category}",
                     )
                 for entry in sorted(other_sites, key=lambda x: x.seconds, reverse=True):
-                    node = self._tree_item(browser, "Autres sites", entry.seconds, "other-sites", entry.key)
+                    node = self._tree_item(
+                        browser, _("Autres sites"), entry.seconds,
+                        "other-sites", entry.key
+                    )
                     self._add_timed_tree_rows(
                         node,
                         [
@@ -1726,11 +1918,16 @@ class PopupPanel(QWidget):
                 self._tree_item(browser, site_category, 0, "site-category", (site_category, []))
         excluded_targets = self.service.usage.excluded_targets()
         if excluded_targets:
-            excluded = self._tree_item(None, "Applications exclues", None, "excluded", None)
+            excluded = self._tree_item(
+                None, _("Applications exclues"), None, "excluded", None
+            )
             for target in excluded_targets:
                 self._tree_item(excluded, target.label, None, "excluded-target", target.key)
         if passive_usage:
-            passive = self._tree_item(None, "Média en arrière-plan", sum(passive_usage.values()), "passive", None)
+            passive = self._tree_item(
+                None, _("Média en arrière-plan"), sum(passive_usage.values()),
+                "passive", None
+            )
             for name, seconds in passive_usage.items():
                 self._tree_item(passive, name, seconds, "passive-item", name)
         for root_index in range(self.tree.topLevelItemCount()):
@@ -1982,19 +2179,19 @@ class PopupPanel(QWidget):
             self._show_category_menu(global_pos, item.text(0), payload)
         elif kind == "excluded-target":
             menu = QMenu(self)
-            restore = menu.addAction("Réactiver")
+            restore = menu.addAction(_("Réactiver"))
             if menu.exec(global_pos) == restore:
                 self.service.usage.unexclude(payload)
                 self.refresh()
 
     def _show_tree_target_menu(self, position, target_key):
         menu = QMenu(self)
-        root_action = menu.addAction("Sortir de non classé")
+        root_action = menu.addAction(_("Sortir de non classé"))
         menu.addSeparator()
-        rename_action = menu.addAction("Renommer l’activité…")
-        category_action = menu.addAction("Ajouter à une catégorie…")
-        exclude_action = menu.addAction("Ne pas comptabiliser")
-        delete_action = menu.addAction("Supprimer…")
+        rename_action = menu.addAction(_("Renommer l’activité…"))
+        category_action = menu.addAction(_("Ajouter à une catégorie…"))
+        exclude_action = menu.addAction(_("Ne pas comptabiliser"))
+        delete_action = menu.addAction(_("Supprimer…"))
         selected = menu.exec(position)
         if selected == root_action:
             self._move_target_to_root(target_key)
@@ -2072,7 +2269,7 @@ class PopupPanel(QWidget):
         row = UsageRow("")
         row.set_tree_branch(3, (2,))
         row.setAcceptDrops(False)
-        row.setToolTip("Clic droit : classer ce site ou le rendre spécifique")
+        row.setToolTip(_("Clic droit : classer ce site ou le rendre spécifique"))
         row.setStyleSheet(
             "background: rgba(48, 48, 53, 190); color: #d8d8dd; "
             "border-radius: 5px;"
@@ -2096,10 +2293,10 @@ class PopupPanel(QWidget):
 
     def _show_other_site_menu(self, position, browser, host):
         menu = QMenu(self)
-        make_specific = menu.addAction("Rendre spécifique")
-        move_to_category = menu.addAction("Déplacer dans une catégorie…")
-        exclude_action = menu.addAction("Ne pas comptabiliser")
-        delete_action = menu.addAction("Supprimer…")
+        make_specific = menu.addAction(_("Rendre spécifique"))
+        move_to_category = menu.addAction(_("Déplacer dans une catégorie…"))
+        exclude_action = menu.addAction(_("Ne pas comptabiliser"))
+        delete_action = menu.addAction(_("Supprimer…"))
         selected = menu.exec(position)
         if selected == make_specific:
             self.service.usage.make_browser_site_specific(browser, host)
@@ -2116,8 +2313,8 @@ class PopupPanel(QWidget):
         categories = self.service.usage.categories()
         category, accepted = QInputDialog.getItem(
             self,
-            "Catégorie",
-            f"Catégorie pour « {host} » :",
+            _("Catégorie"),
+            _("Catégorie pour « {host} » :").format(host=host),
             categories,
             0,
             True,
@@ -2134,43 +2331,59 @@ class PopupPanel(QWidget):
         ).get("label", target_key)
         answer = QMessageBox.question(
             self,
-            "Supprimer l’activité",
-            f"Supprimer définitivement l’historique de « {label} » ?",
+            _("Supprimer l’activité"),
+            _("Supprimer définitivement l’historique de « {label} » ?").format(
+                label=label
+            ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
             self.service.usage.delete_target(target_key)
+            limiter = getattr(self.service, "app_limiter", None)
+            if limiter is not None and hasattr(
+                limiter, "reload_after_target_deleted"
+            ):
+                limiter.reload_after_target_deleted(target_key)
             self.refresh()
 
     def _confirm_delete_browser_site(self, browser, host):
         answer = QMessageBox.question(
             self,
-            "Supprimer le site",
-            f"Supprimer définitivement l’historique de « {host} » ?",
+            _("Supprimer le site"),
+            _("Supprimer définitivement l’historique de « {host} » ?").format(
+                host=host
+            ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if answer == QMessageBox.Yes:
             self.service.usage.delete_browser_site(browser, host)
+            limiter = getattr(self.service, "app_limiter", None)
+            if limiter is not None and hasattr(
+                limiter, "reload_after_target_deleted"
+            ):
+                limiter.reload_after_target_deleted(
+                    f"site:{str(browser).lower()}:{str(host).lower()}"
+                )
             self.refresh()
 
     def _show_browser_menu(self, position, browser):
         menu = QMenu(self)
-        rename_action = menu.addAction("Renommer l’activité…")
+        rename_action = menu.addAction(_("Renommer l’activité…"))
         browser_category = self.service.usage.data.get("browser_categories", {}).get(browser)
         root_action = (
-            menu.addAction("Sortir de non classé")
+            menu.addAction(_("Sortir de non classé"))
             if browser_category == "Applications non classées" else None
         )
         remove_category = (
-            menu.addAction("Retirer de la catégorie")
+            menu.addAction(_("Retirer de la catégorie"))
             if browser_category and browser_category != "__root__" else None
         )
         selected = menu.exec(position)
         if selected == rename_action:
             label, accepted = QInputDialog.getText(
-                self, "Renommer l’activité", "Nouveau nom :",
+                self, _("Renommer l’activité"), _("Nouveau nom :"),
                 text=self.service.usage.browser_label(browser),
             )
             if accepted and label.strip():
@@ -2185,12 +2398,12 @@ class PopupPanel(QWidget):
 
     def _show_site_category_menu(self, position, category, target_keys):
         menu = QMenu(self)
-        rename_category = menu.addAction("Renommer la catégorie…")
-        remove_category = menu.addAction("Retirer de la catégorie")
+        rename_category = menu.addAction(_("Renommer la catégorie…"))
+        remove_category = menu.addAction(_("Retirer de la catégorie"))
         selected = menu.exec(position)
         if selected == rename_category:
             label, accepted = QInputDialog.getText(
-                self, "Renommer la catégorie", "Nouveau nom :", text=category
+                self, _("Renommer la catégorie"), _("Nouveau nom :"), text=category
             )
             if accepted and label.strip():
                 self.service.usage.rename_site_category_for_keys(target_keys, label)
@@ -2220,7 +2433,9 @@ class PopupPanel(QWidget):
 
     def _show_passive_menu(self, media_name, position):
         menu = QMenu(self)
-        exclude_action = menu.addAction("Ne pas comptabiliser dans lecture passive")
+        exclude_action = menu.addAction(
+            _("Ne pas comptabiliser dans lecture passive")
+        )
         if menu.exec(position) == exclude_action:
             self.service.usage.exclude_passive(media_name)
             self.refresh()
@@ -2259,13 +2474,15 @@ class PopupPanel(QWidget):
 
     def _show_category_menu(self, position, category, target_keys):
         menu = QMenu(self)
-        rename_action = menu.addAction("Renommer la catégorie…")
-        move_action = menu.addAction(f"Déplacer « {category} » dans une catégorie…")
+        rename_action = menu.addAction(_("Renommer la catégorie…"))
+        move_action = menu.addAction(
+            _("Déplacer « {category} » dans une catégorie…").format(category=category)
+        )
         parent_category = self.service.usage.data.get("category_parents", {}).get(category)
         root_action = (
-            menu.addAction("Remonter à la racine") if parent_category else None
+            menu.addAction(_("Remonter à la racine")) if parent_category else None
         )
-        remove_action = menu.addAction("Retirer de la catégorie")
+        remove_action = menu.addAction(_("Retirer de la catégorie"))
         selected = menu.exec(position)
         if selected == rename_action:
             self._rename_category(category)
@@ -2283,8 +2500,8 @@ class PopupPanel(QWidget):
         categories = self.service.usage.categories()
         parent, accepted = QInputDialog.getItem(
             self,
-            "Catégorie parente",
-            f"Catégorie cible pour « {category} » :",
+            _("Catégorie parente"),
+            _("Catégorie cible pour « {category} » :").format(category=category),
             categories,
             0,
             True,
@@ -2295,20 +2512,20 @@ class PopupPanel(QWidget):
 
     def _show_entry_menu(self, position, target_key):
         menu = QMenu(self)
-        rename_action = menu.addAction("Renommer l’activité…")
-        category_action = menu.addAction("Ajouter à une catégorie…")
-        remove_category_action = menu.addAction("Retirer de la catégorie")
-        merge_action = menu.addAction("Fusionner dans une autre application…")
+        rename_action = menu.addAction(_("Renommer l’activité…"))
+        category_action = menu.addAction(_("Ajouter à une catégorie…"))
+        remove_category_action = menu.addAction(_("Retirer de la catégorie"))
+        merge_action = menu.addAction(_("Fusionner dans une autre application…"))
         specific_site_actions = {}
         browser = _other_sites_browser(target_key)
         if browser:
-            sites_menu = menu.addMenu("Rendre spécifique")
+            sites_menu = menu.addMenu(_("Rendre spécifique"))
             sites = self.service.usage.other_sites(browser)
             for host, seconds in sorted(sites.items(), key=lambda item: item[1], reverse=True):
                 action = sites_menu.addAction(f"{host} ({_format_seconds(seconds)})")
                 specific_site_actions[action] = host
         menu.addSeparator()
-        exclude_action = menu.addAction("Ne pas comptabiliser")
+        exclude_action = menu.addAction(_("Ne pas comptabiliser"))
         selected = menu.exec(position)
         if selected == rename_action:
             self._rename_target(target_key)
@@ -2334,8 +2551,8 @@ class PopupPanel(QWidget):
         ).get("label", target_key)
         label, accepted = QInputDialog.getText(
             self,
-            "Renommer l’activité",
-            "Nouveau nom :",
+            _("Renommer l’activité"),
+            _("Nouveau nom :"),
             text=current_label,
         )
         if accepted and label.strip():
@@ -2345,8 +2562,8 @@ class PopupPanel(QWidget):
     def _rename_category(self, category):
         label, accepted = QInputDialog.getText(
             self,
-            "Renommer la catégorie",
-            "Nouveau nom :",
+            _("Renommer la catégorie"),
+            _("Nouveau nom :"),
             text=category,
         )
         if accepted and label.strip():
@@ -2360,8 +2577,8 @@ class PopupPanel(QWidget):
         labels = [f"{target.label} ({target.key})" for target in excluded_targets]
         selected_label, accepted = QInputDialog.getItem(
             self,
-            "Applications non comptabilisées",
-            "Sélectionne une application à réactiver :",
+            _("Applications non comptabilisées"),
+            _("Sélectionnez une application à réactiver :"),
             labels,
             0,
             False,
@@ -2378,8 +2595,8 @@ class PopupPanel(QWidget):
         labels = [f"{target.label} ({target.key})" for target in candidates]
         selected_label, accepted = QInputDialog.getItem(
             self,
-            "Fusionner l’application",
-            "Fusionner toutes les durées dans :",
+            _("Fusionner l’application"),
+            _("Fusionner toutes les durées dans :"),
             labels,
             0,
             False,
@@ -2404,9 +2621,11 @@ class PopupPanel(QWidget):
             return
         result = QMessageBox.question(
             self,
-            "Fusionner les applications",
-            f"Fusionner « {source.label} » dans « {destination.label} » ?\n\n"
-            "Toutes les durées de la première seront déplacées vers la seconde.",
+            _("Fusionner les applications"),
+            _(
+                "Fusionner « {source} » dans « {destination} » ?\n\n"
+                "Toutes les durées de la première seront déplacées vers la seconde."
+            ).format(source=source.label, destination=destination.label),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
@@ -2418,8 +2637,8 @@ class PopupPanel(QWidget):
         categories = self.service.usage.categories()
         category, accepted = QInputDialog.getItem(
             self,
-            "Catégorie",
-            "Catégorie existante ou nouveau nom :",
+            _("Catégorie"),
+            _("Catégorie existante ou nouveau nom :"),
             categories,
             0,
             True,

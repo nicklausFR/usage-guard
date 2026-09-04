@@ -1,0 +1,164 @@
+name: Client Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: GitHub release tag (for example client-v1.020)
+        required: true
+        type: string
+      mandatory:
+        description: Mandatory update
+        required: true
+        default: true
+        type: boolean
+      minimum_version:
+        description: Oldest version allowed to perform the update
+        required: true
+        type: string
+      notes:
+        description: Release notes
+        required: true
+        type: string
+      publish:
+        description: Publish after the build and tests pass
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install build dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-build.txt
+
+      - name: Check the PWA, translations, and complete test suite
+        shell: pwsh
+        run: |
+          node --check .\pwa\app.js
+          node --check .\browser_extension\background.js
+          node --check .\browser_extension\content.js
+          node --check .\browser_extension\options.js
+          node --check .\browser_news_blocker\background.js
+          node --check .\browser_news_blocker\reminder.js
+          node --check .\browser_news_blocker\options.js
+          python .\tools\audit_i18n.py
+          node .\tools\check_pwa_i18n.js
+          python -B -m unittest discover -s tests
+
+      - name: Import the temporary Authenticode certificate
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.CLIENT_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.CLIENT_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64)) {
+            throw 'Missing CLIENT_SIGNING_PFX_BASE64 secret.'
+          }
+          $certificatePath = Join-Path $env:RUNNER_TEMP 'usage-guard-signing.pfx'
+          [IO.File]::WriteAllBytes(
+            $certificatePath,
+            [Convert]::FromBase64String($env:SIGNING_PFX_BASE64)
+          )
+          $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD `
+            -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $certificatePath `
+            -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item -LiteralPath $certificatePath -Force
+          "USAGE_GUARD_SIGNING_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+          "USAGE_GUARD_REQUIRE_SIGNING=1" >> $env:GITHUB_ENV
+
+      - name: Build the signed release once
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_MANDATORY: ${{ inputs.mandatory }}
+          RELEASE_MINIMUM_VERSION: ${{ inputs.minimum_version }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+        run: |
+          $clientVersion = python -c "from client_version import CLIENT_VERSION; print(CLIENT_VERSION)"
+          $expectedTag = "client-v$clientVersion"
+          if ($env:RELEASE_TAG -ne $expectedTag) {
+            throw "Release tag '$env:RELEASE_TAG' must be exactly '$expectedTag'."
+          }
+          $arguments = @(
+            '-BuildOnly',
+            '-MinimumVersion', $env:RELEASE_MINIMUM_VERSION,
+            '-Notes', $env:RELEASE_NOTES
+          )
+          if ($env:RELEASE_MANDATORY -eq 'true') { $arguments += '-Mandatory' }
+          & .\tools\publish_client_release.ps1 @arguments
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: usage-guard-client-${{ inputs.release_tag }}
+          if-no-files-found: error
+          path: |
+            usage_guard_backend/client_updates/Installer-Usage-Guard-*.exe
+            usage_guard_backend/client_updates/usage-guard-client-*.zip
+            usage_guard_backend/client_updates/manifest.json
+
+      - name: Prepare SSH access for backend publishing
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          RELEASE_SSH_KEY: ${{ secrets.CLIENT_RELEASE_SSH_KEY }}
+          RELEASE_KNOWN_HOSTS: ${{ secrets.CLIENT_RELEASE_KNOWN_HOSTS }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_SSH_KEY)) {
+            throw 'Missing CLIENT_RELEASE_SSH_KEY secret.'
+          }
+          New-Item -ItemType Directory -Path "$env:USERPROFILE\.ssh" -Force | Out-Null
+          Set-Content -LiteralPath "$env:USERPROFILE\.ssh\id_ed25519" `
+            -Value $env:RELEASE_SSH_KEY -NoNewline
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_KNOWN_HOSTS)) {
+            throw 'Missing CLIENT_RELEASE_KNOWN_HOSTS secret.'
+          }
+          Set-Content -LiteralPath "$env:USERPROFILE\.ssh\known_hosts" `
+            -Value $env:RELEASE_KNOWN_HOSTS
+
+      - name: Publish the ZIP and manifest atomically to the backend
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          RELEASE_HOST: ${{ secrets.CLIENT_RELEASE_HOST }}
+          RELEASE_USER: ${{ secrets.CLIENT_RELEASE_USER }}
+          RELEASE_DIRECTORY: ${{ secrets.CLIENT_RELEASE_DIRECTORY }}
+        run: |
+          & .\tools\publish_client_release.ps1 -PublishExisting `
+            -Server $env:RELEASE_HOST -RemoteUser $env:RELEASE_USER `
+            -RemoteDirectory $env:RELEASE_DIRECTORY
+
+      - name: Publish the installer in the GitHub release
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+        run: |
+          $installer = Get-Item `
+            .\usage_guard_backend\client_updates\Installer-Usage-Guard-*.exe
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "GitHub release '$env:RELEASE_TAG' already exists."
+          }
+          gh release create $env:RELEASE_TAG $installer.FullName `
+            --title "Usage Guard $env:RELEASE_TAG" --notes $env:RELEASE_NOTES

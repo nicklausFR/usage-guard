@@ -1,10 +1,13 @@
 import base64
 import copy
+import hashlib
 import json
 import os
 import shutil
 import sys
+import threading
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, date, timezone, timedelta
 from email.utils import parseaddr
@@ -14,16 +17,56 @@ from urllib.parse import urlparse
 import yaml
 import win32crypt
 
+from activity_keys import is_other_sites_aggregate_key
+from local_activity_sqlite import (
+    ACTIVITY_SECTIONS, DICT_SECTIONS, LIST_SECTIONS, LocalActivitySqlite,
+)
+from runtime_profile import current_profile
+
 
 APP_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.yaml"
 APP_NAME = "Usage Guard"
 LEGACY_APP_NAME = "Usage Monitor"
+_runtime_profile = current_profile()
+_local_pwa_port = _runtime_profile.remote_api_port
+_known_local_pwa_ports = {_local_pwa_port, 8766, 18766}
 KNOWN_LOCAL_SITE_LABELS = {
-    "localhost:8766": APP_NAME,
-    "127.0.0.1:8766": APP_NAME,
-    "[::1]:8766": APP_NAME,
+    host: APP_NAME
+    for port in _known_local_pwa_ports if port
+    for host in (
+        f"localhost:{port}", f"127.0.0.1:{port}", f"[::1]:{port}",
+    )
 }
+
+CATALOG_DOCUMENT_FIELDS = (
+    "targets", "excluded", "excluded_sites", "browser_categories",
+    "category_parents", "category_order", "target_order",
+    "navigation_position", "unclassified_position", "browser_labels",
+    "browser_specific_sites", "site_categories",
+    "site_category_order_manual", "passive_excluded", "merged_targets",
+    "dismissed_targets",
+)
+CATALOG_DOCUMENT_DICT_FIELDS = {
+    "targets", "browser_categories", "category_parents",
+    "navigation_position", "unclassified_position", "browser_labels",
+    "browser_specific_sites", "merged_targets", "dismissed_targets",
+}
+CATALOG_DOCUMENT_LIST_FIELDS = {
+    "excluded", "excluded_sites", "category_order", "target_order",
+    "site_categories", "passive_excluded",
+}
+
+METADATA_BACKUP_FIELDS = CATALOG_DOCUMENT_FIELDS + (
+    "app_limit_settings", "personal_policy_overlay", "notification_rules",
+    "default_limit_warning_seconds", "computer_block", "computer_blocks",
+)
+METADATA_BACKUP_MAX_BYTES = 2 * 1024 * 1024
+METADATA_BACKUP_RETENTION = 7
+BACKEND_ACTIVITY_BACKFILL_VERSION = 1
+BACKEND_ACTIVITY_BACKFILL_DAYS = 3
+BACKEND_ACTIVITY_BACKFILL_MAX_RECORDS = 20_000
+BACKEND_ACTIVITY_BACKFILL_MAX_BYTES = 16 * 1024 * 1024
 
 
 def _repair_mojibake_text(value):
@@ -102,7 +145,8 @@ def _repair_mojibake_data(value, sum_numbers=False):
 
 def _usage_path():
     """Return a location which survives a PyInstaller one-file restart."""
-    if not getattr(sys, "frozen", False):
+    profile = current_profile()
+    if profile.production and not getattr(sys, "frozen", False):
         return APP_DIR / "activity.json"
 
     # In a one-file executable, ``__file__`` is inside PyInstaller's temporary
@@ -114,9 +158,9 @@ def _usage_path():
         if local_app_data
         else Path.home() / "AppData" / "Local"
     )
-    destination = base / APP_NAME / "activity.json"
+    destination = base / profile.data_directory_name / "activity.json"
     legacy = base / LEGACY_APP_NAME / "activity.json"
-    if not destination.exists() and legacy.exists():
+    if profile.production and not destination.exists() and legacy.exists():
         try:
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(legacy, destination)
@@ -136,6 +180,14 @@ class Config:
                 data = yaml.safe_load(stream) or {}
         else:
             data = {}
+        profile = current_profile()
+        if not profile.production:
+            data = {
+                **data,
+                "REMOTE_API_PORT": profile.remote_api_port,
+                "BACKEND_ENABLED": False,
+                "AUTOSTART_WITH_WINDOWS": False,
+            }
         self._data = data
         self.__dict__.update(data)
 
@@ -168,7 +220,7 @@ def computer_on_seconds_today():
         return None
 
 
-def windows_session_started_at():
+def windows_session_started_at(session_id=None):
     """Return the logon time of the current interactive Windows session."""
     if sys.platform != "win32":
         return None
@@ -194,7 +246,9 @@ def windows_session_started_at():
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         wtsapi32 = ctypes.WinDLL("wtsapi32", use_last_error=True)
-        session_id = kernel32.WTSGetActiveConsoleSessionId()
+        if session_id is None:
+            session_id = kernel32.WTSGetActiveConsoleSessionId()
+        session_id = int(session_id)
         if session_id == 0xFFFFFFFF:
             return None
         buffer, returned = wintypes.LPVOID(), wintypes.DWORD()
@@ -222,7 +276,9 @@ def windows_session_started_at():
 
 DEBUG_LOG_PATH = (
     Path(sys.executable).resolve().parent / "usage-guard-debug.log"
-    if getattr(sys, "frozen", False)
+    if getattr(sys, "frozen", False) and current_profile().production
+    else current_profile().local_data_directory() / "usage-guard-debug.log"
+    if not current_profile().production
     else APP_DIR / "usage-guard-debug.log"
 )
 
@@ -241,19 +297,69 @@ def debug_log(message):
 class AppUsageStore:
     """Small local store containing active seconds per application and day."""
 
+    _NOTIFICATION_KIND_ALIASES = {
+        "computer_block_change": "limit_change",
+        "computer_block_warning": "limit_warning",
+    }
+
     def __init__(self, path=USAGE_PATH):
         self.path = Path(path)
-        self._import_legacy_activity_file()
-        self._backup_activity_file()
+        self.activity_database_path = self.path.with_suffix(".sqlite3")
+        self._activity_sqlite = LocalActivitySqlite(
+            self.activity_database_path
+        )
+        self._load_normalized = False
+        # The monitor thread appends closures while the service IPC thread can
+        # read or compact the same journal.  Serializing all three operations
+        # prevents a line appended between ``read(tail)`` and ``replace`` from
+        # being discarded by acknowledgement compaction.
+        self._activity_outbox_lock = threading.RLock()
+        self.activity_outbox_path = self.path.with_name(
+            self.path.stem + "-backend-intervals.jsonl"
+        )
+        self.activity_outbox_state_path = self.path.with_name(
+            self.path.stem + "-backend-intervals-state.json"
+        )
+        self._recent_closed_sessions = deque(maxlen=512)
+        self._active_windows_identity = {}
+        if not self._activity_sqlite.initialized():
+            self._import_legacy_activity_file()
         self.data = self._load()
+        self._backup_activity_metadata()
+        computer_blocks_migrated = self._migrate_legacy_computer_block()
         recipient_secrets_migrated = self._load_notification_recipient_secrets()
+        notification_kinds_migrated = self._migrate_legacy_notification_kinds()
         self.data, encoding_repaired = _repair_mojibake_data(self.data)
         legacy_migrated = self._migrate_legacy_targets()
         legacy_sessions_migrated = self._synthesize_legacy_daily_sessions()
         self._dirty = (
-            recipient_secrets_migrated or encoding_repaired
+            self._load_normalized
+            or
+            computer_blocks_migrated
+            or recipient_secrets_migrated or notification_kinds_migrated
+            or encoding_repaired
             or legacy_migrated or legacy_sessions_migrated
         )
+        self._sqlite_full_sections = (
+            set(ACTIVITY_SECTIONS) if self._dirty else set()
+        )
+        self._sqlite_dict_keys = {
+            section: set() for section in DICT_SECTIONS
+            if section != "other_site_days"
+        }
+        self._sqlite_other_site_keys = set()
+        self._sqlite_list_records = {
+            section: {} for section in LIST_SECTIONS
+        }
+        self._sqlite_daily_days = set()
+        self._sqlite_section_objects = {
+            section: id(self.data.get(section))
+            for section in ACTIVITY_SECTIONS
+        }
+        if self._ensure_recent_backend_activity_backfill():
+            self._dirty = True
+        if self._purge_synthetic_other_sites_sessions():
+            self._dirty = True
         if encoding_repaired:
             backup = self.path.with_suffix(".encoding-backup.json")
             try:
@@ -264,20 +370,89 @@ class AppUsageStore:
         if self._dirty:
             self.save(force=True)
 
-    def _backup_activity_file(self):
-        """Keep one immutable pre-load copy per day next to the live store."""
+    def _backup_activity_metadata(self):
+        """Keep a small rotating configuration backup, never usage history."""
         if not self.path.exists():
             return
         backup = (
             self.path.parent
             / "backups"
-            / f"{self.path.stem}-{date.today().isoformat()}{self.path.suffix}"
+            / (
+                f"{self.path.stem}-metadata-"
+                f"{date.today().isoformat()}{self.path.suffix}"
+            )
         )
         if backup.exists():
+            backups = sorted(backup.parent.glob(
+                f"{self.path.stem}-metadata-*{self.path.suffix}"
+            ))
+            for expired in backups[:-METADATA_BACKUP_RETENTION]:
+                try:
+                    expired.unlink(missing_ok=True)
+                except OSError:
+                    pass
             return
         try:
             backup.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(self.path, backup)
+            configuration = {
+                field: copy.deepcopy(self.data.get(field))
+                for field in METADATA_BACKUP_FIELDS
+                if field in self.data
+            }
+            payload = {
+                "version": 1,
+                "kind": "usage-guard-metadata-backup",
+                "created_at": datetime.now().astimezone().isoformat(
+                    timespec="seconds"
+                ),
+                "configuration": configuration,
+                "omitted_fields": [],
+            }
+
+            def encoded():
+                return json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+
+            content = encoded()
+            while (
+                len(content) > METADATA_BACKUP_MAX_BYTES
+                and payload["configuration"]
+            ):
+                largest = max(
+                    payload["configuration"],
+                    key=lambda field: len(json.dumps(
+                        payload["configuration"][field], ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")),
+                )
+                payload["configuration"].pop(largest)
+                payload["omitted_fields"].append(largest)
+                content = encoded()
+            if len(content) > METADATA_BACKUP_MAX_BYTES:
+                payload = {
+                    "version": 1,
+                    "kind": "usage-guard-metadata-backup",
+                    "created_at": payload["created_at"],
+                    "configuration": {},
+                    "omitted_fields": list(METADATA_BACKUP_FIELDS),
+                }
+                content = json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            temporary = backup.with_suffix(".tmp")
+            with temporary.open("wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(backup)
+            backups = sorted(backup.parent.glob(
+                f"{self.path.stem}-metadata-*{self.path.suffix}"
+            ))
+            for expired in backups[:-METADATA_BACKUP_RETENTION]:
+                expired.unlink(missing_ok=True)
         except OSError:
             # Tracking must continue even if a locked-down installation does
             # not allow creation of the optional backup directory.
@@ -342,23 +517,51 @@ class AppUsageStore:
             category for category in source.get("category_order", [])
             if category not in existing_order
         )
+        existing_target_order = target.setdefault("target_order", [])
+        existing_target_order.extend(
+            key for key in source.get("target_order", [])
+            if key not in existing_target_order
+        )
+        if source.get("navigation_position") and not target.get("navigation_position"):
+            target["navigation_position"] = dict(source["navigation_position"])
+        if source.get("unclassified_position") and not target.get("unclassified_position"):
+            target["unclassified_position"] = dict(source["unclassified_position"])
         if source.get("site_category_order_manual"):
             target["site_category_order_manual"] = True
+        dismissed = target.setdefault("dismissed_targets", {})
+        for key, phase in source.get("dismissed_targets", {}).items():
+            dismissed.setdefault(key, phase)
 
     def _load(self):
-        if not self.path.exists():
-            return self._empty_data()
+        sqlite_initialized = self._activity_sqlite.initialized()
+        if sqlite_initialized:
+            data = self._activity_sqlite.load_document()
+        elif not self.path.exists():
+            data = self._empty_data()
+        else:
+            try:
+                # Accept a UTF-8 BOM too: some Windows tools write JSON that way.
+                data = json.loads(self.path.read_text(encoding="utf-8-sig"))
+            except (json.JSONDecodeError, OSError, ValueError, AttributeError):
+                corrupt_path = self.path.with_suffix(".json.corrupt")
+                try:
+                    os.replace(self.path, corrupt_path)
+                except OSError:
+                    pass
+                data = self._empty_data()
         try:
-            # Accept a UTF-8 BOM too: some Windows tools write JSON that way.
-            data = json.loads(self.path.read_text(encoding="utf-8-sig"))
             if not isinstance(data.get("days"), dict):
                 raise ValueError("invalid activity store")
+            loaded_digest = LocalActivitySqlite.document_digest(data)
             data.setdefault("targets", {})
             data.setdefault("excluded", [])
             data.setdefault("excluded_sites", [])
             data.setdefault("browser_categories", {})
             data.setdefault("category_parents", {})
             data.setdefault("category_order", [])
+            data.setdefault("target_order", [])
+            data.setdefault("navigation_position", {})
+            data.setdefault("unclassified_position", {})
             data.setdefault("browser_labels", {})
             data.setdefault("browser_specific_sites", {})
             data.setdefault("site_categories", [])
@@ -367,14 +570,17 @@ class AppUsageStore:
             data.setdefault("passive_days", {})
             data.setdefault("passive_excluded", [])
             data.setdefault("merged_targets", {})
+            data.setdefault("dismissed_targets", {})
             data.setdefault("system_days", {})
             data.setdefault("app_limit_days", {})
             data.setdefault("app_limit_rolling", {})
             data.setdefault("app_limit_rolling_migrated", [])
             data.setdefault("app_limit_settings", {})
+            data.setdefault("personal_policy_overlay", {})
             data.setdefault("sessions", [])
             data.setdefault("open_sessions", {})
             data.setdefault("windows_sessions", [])
+            data.setdefault("system_events", [])
             data.setdefault("notification_rules", [])
             data.setdefault("default_limit_warning_seconds", 300)
             data.setdefault("computer_block", {})
@@ -382,14 +588,26 @@ class AppUsageStore:
             self._repair_sessions(data)
             self._repair_windows_sessions(data)
             data["version"] = 2
+            self._load_normalized = (
+                LocalActivitySqlite.document_digest(data) != loaded_digest
+            )
+            if not sqlite_initialized:
+                # ``activity.json`` remains untouched as the immutable source
+                # of the first migration.  SQLite is marked authoritative only
+                # after a transactional write and a full checksum re-read.
+                self._activity_sqlite.import_legacy(data)
             return data
-        except (json.JSONDecodeError, OSError, ValueError, AttributeError):
+        except (ValueError, AttributeError):
+            if sqlite_initialized:
+                raise RuntimeError("Base d’activité SQLite invalide.")
             corrupt_path = self.path.with_suffix(".json.corrupt")
             try:
                 os.replace(self.path, corrupt_path)
             except OSError:
                 pass
-            return self._empty_data()
+            data = self._empty_data()
+            self._activity_sqlite.import_legacy(data)
+            return data
 
     @staticmethod
     def _empty_data():
@@ -402,6 +620,9 @@ class AppUsageStore:
             "browser_categories": {},
             "category_parents": {},
             "category_order": [],
+            "target_order": [],
+            "navigation_position": {},
+            "unclassified_position": {},
             "browser_labels": {},
             "browser_specific_sites": {},
             "site_categories": [],
@@ -410,24 +631,85 @@ class AppUsageStore:
             "passive_days": {},
             "passive_excluded": [],
             "merged_targets": {},
+            "dismissed_targets": {},
             "system_days": {},
             "app_limit_days": {},
             "app_limit_rolling": {},
             "app_limit_rolling_migrated": [],
             "app_limit_settings": {},
+            "personal_policy_overlay": {},
             "sessions": [],
             "open_sessions": {},
             "windows_sessions": [],
+            "system_events": [],
             "notification_rules": [],
             "default_limit_warning_seconds": 300,
             "computer_block": {},
+            "computer_blocks": [],
             "remote_command_results": {},
         }
 
-    def record_windows_session(self, started_at, observed_at=None):
+    def catalog_document(self):
+        """Return complete classification state without activity history."""
+        empty = self._empty_data()
+        return {
+            field: copy.deepcopy(self.data.get(field, empty[field]))
+            for field in CATALOG_DOCUMENT_FIELDS
+        }
+
+    def replace_catalog(self, document):
+        """Atomically replace classification state while preserving activity."""
+        if not isinstance(document, dict):
+            raise ValueError("Catalogue de classement invalide.")
+        if set(document) - set(CATALOG_DOCUMENT_FIELDS):
+            raise ValueError("Champ de classement inconnu.")
+        empty = self._empty_data()
+        replacement = {}
+        for field in CATALOG_DOCUMENT_FIELDS:
+            value = document.get(field, empty[field])
+            if field in CATALOG_DOCUMENT_DICT_FIELDS and not isinstance(value, dict):
+                raise ValueError(f"Champ de classement invalide : {field}.")
+            if field in CATALOG_DOCUMENT_LIST_FIELDS and not isinstance(value, list):
+                raise ValueError(f"Champ de classement invalide : {field}.")
+            if field == "site_category_order_manual" and not isinstance(value, bool):
+                raise ValueError(f"Champ de classement invalide : {field}.")
+            replacement[field] = copy.deepcopy(value)
+        self.data.update(replacement)
+        self._dirty = True
+        self.save(force=True)
+
+    @staticmethod
+    def _clean_windows_identity(identity):
+        source = dict(identity or {})
+        result = {}
+        for field in (
+            "windows_sid", "windows_domain", "windows_username",
+            "usage_guard_username", "mapping_status",
+        ):
+            value = str(source.get(field) or "").strip()
+            if value:
+                result[field] = value
+        if source.get("session_id") is not None:
+            try:
+                result["windows_session_id"] = int(source["session_id"])
+            except (TypeError, ValueError):
+                pass
+        if "is_windows_admin" in source:
+            result["is_windows_admin"] = bool(source["is_windows_admin"])
+        if "mapped" in source:
+            result["windows_identity_mapped"] = bool(source["mapped"])
+        return result
+
+    def set_active_windows_identity(self, identity):
+        """Prime event journaling before the current session is recorded."""
+        self._active_windows_identity = self._clean_windows_identity(identity)
+        return dict(self._active_windows_identity)
+
+    def record_windows_session(self, started_at, observed_at=None, identity=None, source=None):
         """Remember distinct Windows logon sessions across app restarts."""
         started_at = str(started_at)
         observed_at = str(observed_at or started_at)
+        clean_identity = self.set_active_windows_identity(identity)
         sessions = self.data.setdefault("windows_sessions", [])
         existing = next((item for item in sessions if item.get("started_at") == started_at), None)
         if existing is None:
@@ -450,16 +732,240 @@ class AppUsageStore:
                 "started_at": started_at,
                 "ended_at": None,
                 "last_observed_at": observed_at,
+                **({"source": str(source)} if source else {}),
+                **clean_identity,
             })
             sessions.sort(key=lambda item: str(item.get("started_at", "")), reverse=True)
+            self._mark_sqlite_full("windows_sessions")
             self._dirty = True
             self.save(force=True)
-        elif self._session_ordered(started_at, observed_at):
-            existing["last_observed_at"] = observed_at
+        else:
+            changed = False
+            if not existing.get("ended_at") and self._session_ordered(started_at, observed_at):
+                existing["last_observed_at"] = observed_at
+                changed = True
+            for field, value in clean_identity.items():
+                if existing.get(field) != value:
+                    existing[field] = value
+                    changed = True
+            if changed:
+                self._mark_sqlite_full("windows_sessions")
+                self._dirty = True
+
+    def update_windows_identity(self, identity, observed_at=None):
+        """Apply a recovered SID mapping to the current in-memory sessions.
+
+        Closed rows already waiting in the backend outbox deliberately keep
+        only their stable Windows SID; the backend resolves their Usage Guard
+        owner when it eventually accepts them.  Current rows, however, should
+        immediately inherit the recovered mapping so future closures carry
+        the complete diagnostic identity too.
+        """
+        clean_identity = self._clean_windows_identity(identity)
+        if not clean_identity.get("windows_sid"):
+            return False
+        merged_identity = {
+            **self._active_windows_identity,
+            **clean_identity,
+        }
+        changed = merged_identity != self._active_windows_identity
+        self._active_windows_identity = merged_identity
+        observed_at = str(
+            observed_at
+            or datetime.now().astimezone().isoformat(timespec="seconds")
+        )
+        for item in self.data.setdefault("windows_sessions", []):
+            if item.get("ended_at"):
+                continue
+            for field, value in merged_identity.items():
+                if item.get(field) != value:
+                    item[field] = value
+                    changed = True
+            if self._session_ordered(
+                str(item.get("started_at") or observed_at), observed_at,
+            ) and item.get("last_observed_at") != observed_at:
+                item["last_observed_at"] = observed_at
+                changed = True
+        for item in self.data.setdefault("open_sessions", {}).values():
+            if not isinstance(item, dict):
+                continue
+            for field, value in merged_identity.items():
+                if item.get(field) != value:
+                    item[field] = value
+                    changed = True
+        if changed:
+            self._mark_sqlite_full("windows_sessions", "open_sessions")
             self._dirty = True
+            self.save(force=True)
+        return changed
+
+    def close_windows_session(self, ended_at, reason=None):
+        """Close every current logical session at a verified power boundary."""
+        ended_at = str(ended_at)
+        changed = False
+        for item in self.data.setdefault("windows_sessions", []):
+            started_at = str(item.get("started_at") or ended_at)
+            if item.get("ended_at") or not self._session_ordered(started_at, ended_at):
+                continue
+            exported_session = {
+                **item,
+                "id": "windows:" + str(item.get("started_at") or ""),
+                "kind": "windows_session",
+                "key": "computer:session",
+                "label": "Session Windows",
+                "category": "",
+                "category_lineage": [],
+                "ended_at": ended_at,
+                "windows_identity_mapped": bool(
+                    item.get("usage_guard_username")
+                    or item.get("windows_identity_mapped")
+                ),
+            }
+            if (
+                self._backend_activity_interval(exported_session) is not None
+                and not self._append_backend_activity_interval(exported_session)
+            ):
+                raise OSError("Impossible de journaliser la session Windows.")
+            item["ended_at"] = ended_at
+            if reason:
+                item["ended_reason"] = str(reason)
+            observed = str(item.get("last_observed_at") or ended_at)
+            if self._session_ordered(ended_at, observed):
+                item["last_observed_at"] = ended_at
+            changed = True
+        if changed:
+            self._mark_sqlite_full("windows_sessions")
+            self._dirty = True
+            self.save(force=True)
+        return changed
+
+    def merge_windows_sessions_across_periods(self, periods, tolerance_seconds=5):
+        """Repair sessions split by automatic Modern Standby screen timeout.
+
+        ``periods`` contains verified ``(sleep_at, resume_at)`` boundaries.
+        Only exact adjacent records created by our former sleep splitter are
+        merged; unrelated sessions and real shutdown/logon boundaries remain
+        untouched.
+        """
+        sessions = self.data.setdefault("windows_sessions", [])
+        tolerance = max(0.0, float(tolerance_seconds))
+
+        def parsed(value):
+            try:
+                return datetime.fromisoformat(str(value))
+            except (TypeError, ValueError):
+                return None
+
+        def same_identity(left, right):
+            for field in ("windows_sid", "windows_username", "usage_guard_username"):
+                first = str(left.get(field) or "").casefold()
+                second = str(right.get(field) or "").casefold()
+                if first and second and first != second:
+                    return False
+            return True
+
+        merged = 0
+        for sleep_at, resume_at in sorted(periods, key=lambda item: item[0]):
+            before = next((
+                item for item in sessions
+                if item.get("ended_reason") == "sleep"
+                and parsed(item.get("ended_at")) is not None
+                and abs((parsed(item["ended_at"]) - sleep_at).total_seconds()) <= tolerance
+            ), None)
+            after = next((
+                item for item in sessions
+                if parsed(item.get("started_at")) is not None
+                and abs((parsed(item["started_at"]) - resume_at).total_seconds()) <= tolerance
+            ), None)
+            if before is None or after is None or before is after:
+                continue
+            if not same_identity(before, after):
+                continue
+            before["ended_at"] = after.get("ended_at")
+            before["last_observed_at"] = str(
+                after.get("last_observed_at") or before.get("last_observed_at")
+                or resume_at.isoformat(timespec="seconds")
+            )
+            if after.get("ended_reason"):
+                before["ended_reason"] = after["ended_reason"]
+            else:
+                before.pop("ended_reason", None)
+            before["screen_idle_repaired"] = True
+            sessions.remove(after)
+            merged += 1
+        if merged:
+            sessions.sort(
+                key=lambda item: str(item.get("started_at", "")), reverse=True,
+            )
+            self._mark_sqlite_full("windows_sessions")
+            self._dirty = True
+            self.save(force=True)
+        return merged
 
     def windows_sessions(self):
         return [dict(item) for item in self.data.get("windows_sessions", []) if item.get("started_at")]
+
+    def record_system_event(self, event_type, at=None, **details):
+        """Persist power/tracking transitions for local and remote timelines."""
+        allowed = {
+            "guard_start", "guard_stop", "sleep", "resume", "shutdown",
+            "tracking_gap", "shutdown_cancelled",
+        }
+        event_type = str(event_type)
+        if event_type not in allowed:
+            raise ValueError(f"unsupported system event: {event_type}")
+        timestamp = str(at or datetime.now().astimezone().isoformat(timespec="seconds"))
+        event = {"type": event_type, "at": timestamp}
+        event.update({key: value for key, value in details.items() if value is not None})
+        events = self.data.setdefault("system_events", [])
+        if events and events[-1] == event:
+            return False
+        try:
+            point = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            point_end = (point + timedelta(microseconds=1)).isoformat(
+                timespec="microseconds"
+            )
+            supplied_end = details.get("ended_at")
+            if supplied_end:
+                parsed_end = datetime.fromisoformat(
+                    str(supplied_end).replace("Z", "+00:00")
+                )
+                if (
+                    parsed_end.tzinfo is not None
+                    and point.tzinfo is not None
+                    and parsed_end > point
+                ):
+                    point_end = str(supplied_end)
+        except ValueError:
+            point_end = timestamp
+        exported_event = {
+            **self._active_windows_identity,
+            "id": event_type, "kind": "system_event",
+            "key": "computer:event", "label": event_type,
+            "started_at": timestamp, "ended_at": point_end,
+            "source": str(details.get("reason") or "system"),
+            "category": "", "category_lineage": [],
+        }
+        if (
+            self._backend_activity_interval(exported_event) is not None
+            and not self._append_backend_activity_interval(exported_event)
+        ):
+            raise OSError("Impossible de journaliser l’événement système.")
+        events.append(event)
+        # Enough for several years while keeping the activity document small.
+        if len(events) > 10_000:
+            del events[:-10_000]
+            self._mark_sqlite_full("system_events")
+        else:
+            self._mark_sqlite_list_record(
+                "system_events", event, len(events) - 1,
+            )
+        self._dirty = True
+        self.save(force=True)
+        return True
+
+    def system_events(self):
+        return [dict(item) for item in self.data.get("system_events", []) if item.get("type") and item.get("at")]
 
     def _synthesize_legacy_daily_sessions(self):
         """Make pre-timeline daily totals selectable without inventing exact hours."""
@@ -542,6 +1048,72 @@ class AppUsageStore:
         self.prune_expired_notification_rules()
         return [dict(item) for item in self.data.get("notification_rules", [])]
 
+    def _migrate_legacy_notification_kinds(self):
+        """Merge obsolete computer-only events into the shared limit events."""
+        rules = self.data.get("notification_rules", [])
+        if not isinstance(rules, list):
+            self.data["notification_rules"] = []
+            return True
+        current = [
+            dict(rule) for rule in rules
+            if isinstance(rule, dict)
+            and str(rule.get("kind") or "") not in self._NOTIFICATION_KIND_ALIASES
+        ]
+        legacy = [
+            dict(rule) for rule in rules
+            if isinstance(rule, dict)
+            and str(rule.get("kind") or "") in self._NOTIFICATION_KIND_ALIASES
+        ]
+        if not legacy:
+            return len(current) != len(rules)
+        for rule in legacy:
+            rule["kind"] = self._NOTIFICATION_KIND_ALIASES[
+                str(rule.get("kind") or "")
+            ]
+            rule["label"] = (
+                "Ajout, modification ou suppression d’une limite"
+                if rule["kind"] == "limit_change"
+                else "Préavis avant une limite"
+            )
+            key = (
+                rule["kind"], str(rule.get("owner") or "").casefold(),
+                str(rule.get("target_key") or ""),
+            )
+            existing = next((
+                item for item in current
+                if (
+                    str(item.get("kind") or ""),
+                    str(item.get("owner") or "").casefold(),
+                    str(item.get("target_key") or ""),
+                ) == key
+            ), None)
+            if existing is None:
+                current.append(rule)
+                continue
+            channels = set(existing.get("channels") or ["windows"])
+            channels.update(rule.get("channels") or ["windows"])
+            existing["channels"] = [
+                channel for channel in ("windows", "email")
+                if channel in channels
+            ]
+            if not str(existing.get("email_recipient") or "").strip():
+                existing["email_recipient"] = str(
+                    rule.get("email_recipient") or ""
+                ).strip()
+            if not str(existing.get("description") or "").strip():
+                existing["description"] = str(
+                    rule.get("description") or ""
+                ).strip()
+        for rule in current:
+            if rule.get("kind") == "limit_change" and str(
+                rule.get("label") or ""
+            ) in {"", "Ajout ou modification d’une limite"}:
+                rule["label"] = (
+                    "Ajout, modification ou suppression d’une limite"
+                )
+        self.data["notification_rules"] = current
+        return True
+
     @staticmethod
     def notification_rule_active(rule, now=None):
         now = now or datetime.now().astimezone()
@@ -596,17 +1168,19 @@ class AppUsageStore:
 
     def set_notification_rule(self, rule):
         source = dict(rule or {})
-        kind = str(source.get("kind", ""))
+        kind = self._NOTIFICATION_KIND_ALIASES.get(
+            str(source.get("kind", "")), str(source.get("kind", ""))
+        )
         if kind not in {
-            "limited_app_start", "limit_change", "limit_warning",
+            "limited_app_start", "limit_change", "limit_warning", "limit_reached",
             "limit_extension",
-            "pwa_login", "client_connected", "client_disconnected",
+            "pwa_login", "limit_override_login", "access_change", "client_connected", "client_disconnected", "computer_state",
+            "protection_interrupted",
             "usage_threshold", "startup_reminder",
-            "computer_block_warning", "computer_block_change",
         }:
             raise ValueError("Type de notification non pris en charge.")
         target_key = str(source.get("target_key", ""))
-        if kind in {"limited_app_start", "limit_warning"}:
+        if kind in {"limited_app_start", "limit_warning", "limit_reached", "access_change", "computer_state"}:
             target_key = ""
         known_limits = self.data.get("app_limit_settings", {})
         known_targets = self.data.get("targets", {})
@@ -671,20 +1245,55 @@ class AppUsageStore:
         rule_id = str(source.get("id", ""))
         if rule_id.startswith("builtin:"):
             raise ValueError("Identifiant de notification réservé.")
+        login_role_scope = str(source.get("login_role_scope", "both")).strip().lower()
+        if kind == "pwa_login" and login_role_scope not in {"users", "admins", "both"}:
+            raise ValueError("Type de compte à surveiller invalide.")
+        allowed_subject_roles = {"limited", "user", "admin"}
+        requested_subject_roles = source.get("subject_roles")
+        if kind in {"pwa_login", "access_change"}:
+            if requested_subject_roles is None:
+                subject_roles = (
+                    ["admin"] if login_role_scope == "admins"
+                    else ["limited", "user"] if login_role_scope == "users"
+                    else ["limited", "user", "admin"]
+                )
+            elif not isinstance(requested_subject_roles, (list, tuple, set)):
+                raise ValueError("Rôles concernés invalides.")
+            else:
+                normalized_subject_roles = {
+                    str(role).strip().lower() for role in requested_subject_roles
+                    if str(role).strip()
+                }
+                if not normalized_subject_roles or any(
+                    role not in allowed_subject_roles
+                    for role in normalized_subject_roles
+                ):
+                    raise ValueError("Choisissez au moins un rôle concerné valide.")
+                subject_roles = [
+                    role for role in ("limited", "user", "admin")
+                    if role in normalized_subject_roles
+                ]
+        else:
+            subject_roles = []
+        if kind != "pwa_login":
+            login_role_scope = ""
         normalized = {
             "id": rule_id or uuid.uuid4().hex,
             "kind": kind,
             "owner": str(source.get("owner", "")).strip(),
             "label": str(source.get("label", "")).strip() or (
                 "Démarrage d’une activité limitée" if kind == "limited_app_start"
-                else "Ajout ou modification d’une limite" if kind == "limit_change"
+                else "Ajout, modification ou suppression d’une limite" if kind == "limit_change"
                 else "Préavis avant une limite" if kind == "limit_warning"
+                else "Limite atteinte" if kind == "limit_reached"
                 else "Dépassement d’une limite avec le joker" if kind == "limit_extension"
-                else "Préavis avant une limitation de l’ordinateur" if kind == "computer_block_warning"
-                else "Modification d’une limitation de l’ordinateur" if kind == "computer_block_change"
                 else "Connexion à la PWA" if kind == "pwa_login"
+                else "Connexion administrateur pendant une limitation" if kind == "limit_override_login"
+                else "Changement de droits d’un utilisateur" if kind == "access_change"
                 else "Connexion du client" if kind == "client_connected"
                 else "Déconnexion du client" if kind == "client_disconnected"
+                else "Ordinateur allumé, éteint ou en veille" if kind == "computer_state"
+                else "Interruption de la protection" if kind == "protection_interrupted"
                 else f"Seuil de durée atteint" if kind == "usage_threshold" and threshold_mode == "duration"
                 else f"Horaire atteint" if kind == "usage_threshold" and threshold_mode == "time"
                 else f"Dépassement du seuil de {threshold} %" if kind == "usage_threshold"
@@ -704,6 +1313,8 @@ class AppUsageStore:
             "weekdays": weekdays,
             "channels": channels,
             "email_recipient": email_recipient,
+            "login_role_scope": login_role_scope,
+            "subject_roles": subject_roles,
             "enabled": bool(source.get("enabled", True)),
         }
         rules = self.data.setdefault("notification_rules", [])
@@ -729,13 +1340,224 @@ class AppUsageStore:
         self._dirty = True
         self.save(force=True)
 
+    def _migrate_legacy_computer_block(self):
+        """Adopt the legacy singleton once and repair stable rule identifiers."""
+        source = self.data.get("computer_blocks")
+        collection_was_present = isinstance(source, list)
+        changed = not collection_was_present
+        blocks = []
+        used_ids = set()
+        for source_block in source if collection_was_present else []:
+            if not isinstance(source_block, dict) or not source_block:
+                changed = True
+                continue
+            block = copy.deepcopy(source_block)
+            block_id = str(block.get("block_id") or "").strip()
+            if not block_id or block_id in used_ids:
+                block_id = uuid.uuid4().hex
+                changed = True
+            if block.get("block_id") != block_id:
+                block["block_id"] = block_id
+                changed = True
+            used_ids.add(block_id)
+            blocks.append(block)
+
+        legacy = self.data.get("computer_block")
+        if not collection_was_present and isinstance(legacy, dict) and legacy:
+            block = copy.deepcopy(legacy)
+            block_id = str(block.get("block_id") or "").strip()
+            if not block_id or block_id in used_ids:
+                block_id = uuid.uuid4().hex
+            block["block_id"] = block_id
+            blocks.append(block)
+            self.data["computer_block"] = copy.deepcopy(block)
+            changed = True
+
+        self.data["computer_blocks"] = blocks
+        return changed
+
+    def computer_blocks(self):
+        """Return independent copies of all canonical whole-computer rules."""
+        return [copy.deepcopy(block) for block in self.data.get("computer_blocks", [])]
+
+    def _computer_block_index(self, block_id=None):
+        blocks = self.data.get("computer_blocks", [])
+        if block_id is None or not str(block_id).strip():
+            if not blocks:
+                raise ValueError("Limitation de l’ordinateur introuvable.")
+            if len(blocks) != 1:
+                raise ValueError(
+                    "Plusieurs limitations de l’ordinateur existent ; block_id est requis."
+                )
+            return 0
+        expected = str(block_id).strip()
+        for index, block in enumerate(blocks):
+            if str(block.get("block_id") or "") == expected:
+                return index
+        raise ValueError("Limitation de l’ordinateur introuvable.")
+
+    def computer_block(self, block_id=None):
+        """Return one rule, requiring an id when more than one rule exists."""
+        return copy.deepcopy(
+            self.data["computer_blocks"][self._computer_block_index(block_id)]
+        )
+
+    def set_effective_computer_block(self, block_or_id=None):
+        """Set the legacy effective-rule mirror without changing canonical rules."""
+        if block_or_id is None:
+            selected = {}
+        else:
+            reference = block_or_id
+            if isinstance(reference, dict) and isinstance(reference.get("block"), dict):
+                reference = reference["block"]
+            block_id = (
+                reference.get("block_id") if isinstance(reference, dict) else reference
+            )
+            selected = self.computer_block(block_id)
+        if self.data.get("computer_block") != selected:
+            self.data["computer_block"] = copy.deepcopy(selected)
+            self._dirty = True
+            self.save(force=True)
+        return copy.deepcopy(selected)
+
+    def replace_computer_blocks(self, blocks, managed_by="backend", now=None):
+        """Atomically reconcile the whole-computer document from the server.
+
+        The backend collection is authoritative only for backend-managed
+        rules.  A locally-created rule can exist briefly before its upload is
+        acknowledged, so an incoming document must not discard unrelated
+        local rules.  When the server returns the same ``block_id``, its copy
+        wins and becomes backend-managed.
+        """
+        if not isinstance(blocks, list):
+            raise ValueError("Document de limitations de l’ordinateur invalide.")
+        now = now or datetime.now().astimezone()
+        existing_blocks = self.computer_blocks()
+        existing = {
+            str(block.get("block_id") or ""): block
+            for block in existing_blocks
+        }
+        seeds = []
+        seen = set()
+        for source in blocks:
+            if not isinstance(source, dict):
+                raise ValueError("Limitation de l’ordinateur invalide.")
+            block_id = str(source.get("block_id") or "").strip()
+            if not block_id or block_id in seen:
+                raise ValueError("block_id manquant ou dupliqué.")
+            seen.add(block_id)
+            seeds.append({
+                "block_id": block_id,
+                "enabled": source.get("enabled") is not False,
+                "enforcement_action": (
+                    "warn" if source.get("enforcement_action") == "warn" else "block"
+                ),
+                "name": str(source.get("name") or "").strip(),
+            })
+
+        shadow = copy.copy(self)
+        shadow.data = copy.deepcopy(self.data)
+        shadow.data["computer_blocks"] = seeds
+        shadow.data["computer_block"] = {}
+        shadow.save = lambda *args, **kwargs: None
+        for source in blocks:
+            block_id = str(source["block_id"])
+            mode = str(source.get("mode") or "")
+            normalized = shadow.set_computer_block(
+                mode, source.get("actor", "synchronisation serveur"),
+                block_id=block_id,
+                day=source.get("day"),
+                duration_seconds=(
+                    source.get("duration_seconds")
+                    if source.get("duration_seconds") is not None
+                    else source.get("limit_seconds")
+                ),
+                delay_seconds=source.get("delay_seconds", 0),
+                start_time=(
+                    source.get("start_time")
+                    or source.get("daily_start")
+                    or source.get("schedule_start")
+                ),
+                end_time=(
+                    source.get("end_time")
+                    or source.get("daily_end")
+                    or source.get("schedule_end")
+                ),
+                grace_seconds=source.get("grace_seconds", 300),
+                valid_from=source.get("valid_from"),
+                valid_from_time=source.get("valid_from_time"),
+                valid_until=source.get("valid_until"),
+                valid_until_time=source.get("valid_until_time"),
+                delete_after_expiry=source.get("delete_after_expiry", True),
+                name=source.get("name") if "name" in source else None,
+                enforcement_action=source.get("enforcement_action", "block"),
+                now=now, managed_by=managed_by,
+            )
+            previous = existing.get(block_id, {})
+            for field in ("started_at", "ends_at"):
+                value = source.get(field) or (
+                    previous.get(field)
+                    if previous.get("mode") == mode else ""
+                )
+                if value:
+                    try:
+                        datetime.fromisoformat(str(value))
+                    except (TypeError, ValueError) as error:
+                        raise ValueError(
+                            "Occurrence de limitation invalide."
+                        ) from error
+                    normalized[field] = str(value)
+            normalized["enabled"] = source.get("enabled") is not False
+            index = shadow._computer_block_index(block_id)
+            shadow.data["computer_blocks"][index] = normalized
+
+        replacement = shadow.computer_blocks()
+        if managed_by == "backend":
+            # Keep only unsynchronised local rules whose stable identifier is
+            # not present in the authoritative server response.  Incoming
+            # rules stay first and therefore retain the server's ordering.
+            preserved_ids = set(seen)
+            for block in existing_blocks:
+                block_id = str(block.get("block_id") or "").strip()
+                if (
+                    not block_id
+                    or block_id in preserved_ids
+                    or block.get("managed_by") == "backend"
+                ):
+                    continue
+                replacement.append(copy.deepcopy(block))
+                preserved_ids.add(block_id)
+        self.data["computer_blocks"] = replacement
+        self.data["computer_block"] = {}
+        self._dirty = True
+        self.save(force=True)
+        return self.computer_blocks()
+
     def set_computer_block(
         self, mode, actor="", *, day=None, duration_seconds=None,
-        delay_seconds=0, start_time=None, end_time=None,
+        delay_seconds=0, start_time=None, end_time=None, grace_seconds=300,
         valid_from=None, valid_from_time=None,
-        valid_until=None, valid_until_time=None, now=None,
+        valid_until=None, valid_until_time=None, name=None, now=None,
+        managed_by="local", block_id=None, enforcement_action=None,
+        delete_after_expiry=True,
     ):
+        normalized_block_id = str(block_id or "").strip()
+        existing = (
+            self.computer_block(normalized_block_id)
+            if normalized_block_id else None
+        )
+        if not normalized_block_id:
+            normalized_block_id = uuid.uuid4().hex
         now = now or datetime.now().astimezone()
+        if name is None and existing is not None:
+            name = existing.get("name", "")
+        name = str(name or "").strip()
+        if len(name) > 120:
+            raise ValueError("Le nom de la limitation ne peut pas dépasser 120 caractères.")
+        try:
+            grace_seconds = max(300, int(grace_seconds or 300))
+        except (TypeError, ValueError):
+            raise ValueError("Durée du joker de fermeture invalide.")
         if mode == "today":
             starts_at = now
             ends_at = datetime.combine(now.date() + timedelta(days=1), datetime.min.time()).astimezone()
@@ -914,14 +1736,27 @@ class AppUsageStore:
             ).astimezone()
         else:
             raise ValueError("Durée de blocage de l’ordinateur invalide.")
-        self.data["computer_block"] = {
-            "enabled": True, "mode": mode,
+        block = {
+            "block_id": normalized_block_id,
+            "enabled": bool(existing.get("enabled", True)) if existing else True,
+            "enforcement_action": (
+                "warn" if (
+                    enforcement_action
+                    if enforcement_action is not None
+                    else (existing or {}).get("enforcement_action", "block")
+                ) == "warn" else "block"
+            ),
+            "mode": mode,
+            "name": name,
             "started_at": starts_at.isoformat(timespec="seconds"),
             "ends_at": ends_at.isoformat(timespec="seconds"),
             "actor": str(actor or "Utilisateur local"),
+            "grace_seconds": grace_seconds,
+            "delete_after_expiry": bool(delete_after_expiry),
+            "managed_by": "backend" if managed_by == "backend" else "local",
         }
         if mode == "schedule":
-            self.data["computer_block"].update({
+            block.update({
                 "daily_start": str(start_time),
                 "daily_end": str(end_time),
                 "valid_from": str(valid_from or ""),
@@ -930,14 +1765,14 @@ class AppUsageStore:
                 "valid_until_time": str(valid_until_time or ""),
             })
         if mode == "absolute_range":
-            self.data["computer_block"].update({
+            block.update({
                 "valid_from": str(valid_from or ""),
                 "valid_from_time": str(valid_from_time or ""),
                 "valid_until": str(valid_until or ""),
                 "valid_until_time": str(valid_until_time or ""),
             })
         if mode == "daily_duration":
-            self.data["computer_block"].update({
+            block.update({
                 "limit_seconds": duration_seconds,
                 "valid_from": str(valid_from or ""),
                 "valid_from_time": str(valid_from_time or ""),
@@ -946,23 +1781,51 @@ class AppUsageStore:
                 "schedule_start": str(start_time or ""),
                 "schedule_end": str(end_time or ""),
             })
+        blocks = self.data.setdefault("computer_blocks", [])
+        if existing is None:
+            blocks.append(block)
+        else:
+            blocks[self._computer_block_index(normalized_block_id)] = block
+        # Until every reader consumes computer_blocks, mirror the rule that
+        # was just created or edited into the historical singleton field.
+        self.data["computer_block"] = copy.deepcopy(block)
         self._dirty = True
         self.save(force=True)
-        return dict(self.data["computer_block"])
+        return copy.deepcopy(block)
 
-    def clear_computer_block(self):
-        self.data["computer_block"] = {}
+    def clear_computer_block(self, block_id=None):
+        index = self._computer_block_index(block_id)
+        removed = self.data["computer_blocks"].pop(index)
+        mirror = self.data.get("computer_block")
+        if (
+            isinstance(mirror, dict)
+            and mirror.get("block_id") == removed.get("block_id")
+        ):
+            remaining = self.data["computer_blocks"]
+            self.data["computer_block"] = (
+                copy.deepcopy(remaining[0]) if len(remaining) == 1 else {}
+            )
         self._dirty = True
         self.save(force=True)
+        return copy.deepcopy(removed)
 
-    def set_computer_block_enabled(self, enabled):
-        block = self.data.get("computer_block")
-        if not isinstance(block, dict) or not block:
-            raise ValueError("Limitation de l’ordinateur introuvable.")
+    def set_computer_block_enabled(self, enabled, block_id=None, managed_by=None):
+        index = self._computer_block_index(block_id)
+        block = self.data["computer_blocks"][index]
         block["enabled"] = bool(enabled)
+        if managed_by is not None:
+            block["managed_by"] = (
+                "backend" if managed_by == "backend" else "local"
+            )
+        mirror = self.data.get("computer_block")
+        if (
+            isinstance(mirror, dict)
+            and mirror.get("block_id") == block.get("block_id")
+        ):
+            self.data["computer_block"] = copy.deepcopy(block)
         self._dirty = True
         self.save(force=True)
-        return dict(block)
+        return copy.deepcopy(block)
 
     @staticmethod
     def _repair_sessions(data):
@@ -1051,7 +1914,7 @@ class AppUsageStore:
                 changed = True
         # Earlier builds stored every browser host as its own entry. Keep only
         # YouTube and sites explicitly requested by the user separate.
-        for apps in self.data["days"].values():
+        for day, apps in self.data["days"].items():
             for key, seconds in list(apps.items()):
                 browser, host = _browser_site_parts(key)
                 if not browser or not host or self.is_browser_site_specific(browser, host):
@@ -1065,9 +1928,8 @@ class AppUsageStore:
                 self.data["targets"].pop(key, None)
                 self.data["targets"].setdefault(grouped_key, {})["label"] = "Autres sites"
                 changed = True
-        # A local server is not web browsing. Promote it out of "Autres
-        # sites" (also for activity recorded before this distinction existed)
-        # and treat it like an unclassified application.
+        # Promote local hosts out of the aggregated "Autres sites" entry so
+        # each remains identifiable as a distinct Web site.
         for browser, by_day in self.data.get("other_site_days", {}).items():
             for hosts in by_day.values():
                 for host in list(hosts):
@@ -1106,7 +1968,6 @@ class AppUsageStore:
             str(metadata.get("category", "")).strip()
             for target_key, metadata in self.data["targets"].items()
             if not _browser_for_target(target_key)
-            or metadata.get("category_scope") == "site"
         )
         general_categories.discard("")
         general_categories.discard("__root__")
@@ -1152,13 +2013,26 @@ class AppUsageStore:
                 # A local site starts in the configured default category, but
                 # it is still a normal user activity: never overwrite a
                 # category chosen manually (for example, "Programmation").
-                if not metadata.get("category"):
+                if (
+                    not metadata.get("category")
+                    or metadata.get("category") == "Applications non classées"
+                ):
                     metadata["category"] = local_category
                     changed = True
                 if metadata.get("category_scope") != "site":
                     metadata["category_scope"] = "site"
                     changed = True
                 continue
+            if (
+                browser and host
+                and metadata.get("category_scope") == "site"
+                and metadata.get("category") == "Applications non classées"
+            ):
+                # A site is never an unclassified application. Keep the host
+                # under the browser root and discard the legacy false scope.
+                metadata["category"] = browser_categories.get(browser, "__root__")
+                metadata.pop("category_scope", None)
+                changed = True
             if metadata.get("category_scope") == "site":
                 continue
             # A category chosen for an individual browser site is a child of
@@ -1218,7 +2092,7 @@ class AppUsageStore:
                 key=f"site:{executable}:other-sites",
                 label="Autres sites",
                 category=self.data["browser_categories"].get(
-                    executable, _browser_label(executable)
+                    executable, "__root__"
                 ),
             ))
         if app_name and executable in browser_apps and host:
@@ -1231,7 +2105,7 @@ class AppUsageStore:
                 category=(
                     local_category
                     or self.data["browser_categories"].get(
-                        executable, _browser_label(executable)
+                        executable, "__root__"
                     )
                 ),
                 detail_host=host if site_key == "other-sites" else "",
@@ -1245,7 +2119,7 @@ class AppUsageStore:
             key=f"app:{app_name.lower()}",
             label=app_name,
             category=(
-                self.data["browser_categories"].get(executable, _browser_label(executable))
+                self.data["browser_categories"].get(executable, "__root__")
                 if executable in browser_apps
                 else ""
             ),
@@ -1296,6 +2170,7 @@ class AppUsageStore:
             metadata["category_scope"] = "site"
             changed = True
         if changed:
+            self._mark_sqlite_full("days", "other_site_days")
             self._dirty = True
         if changed and save:
             self.save(force=True)
@@ -1331,6 +2206,7 @@ class AppUsageStore:
             .setdefault(day, {})
         )
         hosts[host] = round(float(hosts.get(host, 0.0)) + float(seconds), 3)
+        self._mark_sqlite_other_site(browser, day)
 
     def _resolved_target(self, target):
         key = target.key
@@ -1359,6 +2235,7 @@ class AppUsageStore:
         day = (when or date.today()).isoformat()
         apps = self.data["days"].setdefault(day, {})
         apps[target.key] = round(float(apps.get(target.key, 0.0)) + seconds, 3)
+        self._mark_sqlite_dict("days", day, daily=True)
         if target.detail_host:
             self._record_other_site(_other_sites_browser(target.key), day, target.detail_host, seconds)
         metadata = self.data["targets"].setdefault(target.key, {})
@@ -1373,6 +2250,7 @@ class AppUsageStore:
         day = (when or date.today()).isoformat()
         media = self.data["passive_days"].setdefault(day, {})
         media[media_name] = round(float(media.get(media_name, 0.0)) + seconds, 3)
+        self._mark_sqlite_dict("passive_days", day, daily=True)
         self._dirty = True
 
     def is_passive_excluded(self, media_name):
@@ -1401,6 +2279,7 @@ class AppUsageStore:
             totals["with_passive"] = round(
                 float(totals.get("with_passive", 0.0)) + seconds, 3
             )
+        self._mark_sqlite_dict("system_days", day, daily=True)
         self._dirty = True
 
     def is_excluded(self, key):
@@ -1426,11 +2305,16 @@ class AppUsageStore:
     def update_sessions(self, observed, at=None):
         """Synchronize open programs/media and foreground activity sessions."""
         timestamp = at or datetime.now().astimezone().isoformat(timespec="seconds")
-        for windows_session in self.data.setdefault("windows_sessions", []):
+        for windows_position, windows_session in enumerate(
+            self.data.setdefault("windows_sessions", [])
+        ):
             if not windows_session.get("ended_at") and self._session_ordered(
                 str(windows_session.get("started_at", timestamp)), timestamp
             ):
                 windows_session["last_observed_at"] = timestamp
+                self._mark_sqlite_list_record(
+                    "windows_sessions", windows_session, windows_position,
+                )
                 self._dirty = True
                 break
         observed = {str(key): dict(value) for key, value in dict(observed).items()}
@@ -1443,7 +2327,26 @@ class AppUsageStore:
             # Never write a closing timestamp earlier than its opening timestamp.
             started_at = str(session.get("started_at", timestamp))
             ended_at = timestamp if self._session_ordered(started_at, timestamp) else started_at
-            completed.append({**session, "ended_at": ended_at})
+            closed = {**session, "ended_at": ended_at}
+            interval = self._backend_activity_interval(closed)
+            if interval is not None and not self._append_backend_activity_interval(
+                closed
+            ):
+                # Keep the session open so the next observation retries it;
+                # silently dropping a closure would create an unrecoverable
+                # hole in the remote timeline.
+                raise OSError("Impossible de journaliser la session fermée.")
+            self._recent_closed_sessions.append(copy.deepcopy(closed))
+            aggregate_usage_outboxed = bool(
+                is_other_sites_aggregate_key(closed.get("key"))
+                and interval
+                and interval.get("interval_id")
+            )
+            if not aggregate_usage_outboxed:
+                completed.append(closed)
+                self._mark_sqlite_list_record(
+                    "sessions", closed, len(completed) - 1,
+                )
             del open_sessions[key]
             changed = True
         for key, details in observed.items():
@@ -1461,9 +2364,18 @@ class AppUsageStore:
                 "label": str(details.get("label", key)), "started_at": timestamp,
                 "started_before_tracking": bool(details.get("started_before_tracking", False)),
                 "source": str(details.get("source", "monitor")),
+                "category": str(details.get("category", "")),
+                "category_lineage": list(dict.fromkeys(
+                    str(category).strip()
+                    for category in details.get("category_lineage", [])
+                    if str(category).strip()
+                )),
+                "policy_revision": max(0, int(details.get("policy_revision", 0))),
+                **self._active_windows_identity,
             }
             changed = True
         if changed:
+            self._mark_sqlite_full("open_sessions")
             self._dirty = True
 
     def reassign_program_sessions(self, session_id, target_key, label, since=None):
@@ -1482,12 +2394,14 @@ class AppUsageStore:
             session["label"] = label
             changed = True
         if changed:
+            self._mark_sqlite_full("sessions", "open_sessions")
             self._dirty = True
 
     def sessions_for_period(self, start=None, end=None):
         """Return sessions overlapping an inclusive date range, including open ones."""
         start_text = start.isoformat() if start else ""
         end_text = end.isoformat() + "T23:59:59" if end else ""
+        now_text = datetime.now().astimezone().isoformat(timespec="seconds")
         sessions = list(self.data.get("sessions", [])) + [
             {**session, "ended_at": None}
             for session in self.data.get("open_sessions", {}).values()
@@ -1495,10 +2409,61 @@ class AppUsageStore:
         result = []
         for session in sessions:
             opened, closed = str(session.get("started_at", "")), session.get("ended_at")
-            if not opened or (start_text and str(closed or opened) < start_text) or (end_text and opened > end_text):
+            # An open interval can start on the preceding day and remain
+            # visible after midnight.  Its effective end is now, never its
+            # opening timestamp.
+            effective_closed = str(closed or now_text)
+            if not opened or (start_text and effective_closed < start_text) or (end_text and opened > end_text):
                 continue
             result.append(dict(session))
         return sorted(result, key=lambda item: item["started_at"], reverse=True)
+
+    def sessions_for_windows_day(self, selected_day, now=None):
+        """Return complete activity for Windows sessions touching one day."""
+        if not isinstance(selected_day, date):
+            selected_day = date.fromisoformat(str(selected_day))
+        current = now or datetime.now().astimezone()
+        if current.tzinfo is None:
+            current = current.astimezone()
+        day_start = datetime.combine(
+            selected_day, datetime.min.time()
+        ).astimezone()
+        day_end = day_start + timedelta(days=1)
+
+        def parsed(value):
+            try:
+                moment = datetime.fromisoformat(str(value))
+            except (TypeError, ValueError):
+                return None
+            return moment if moment.tzinfo else moment.astimezone()
+
+        windows = []
+        for item in self.windows_sessions():
+            opened = parsed(item.get("started_at"))
+            closed = parsed(item.get("ended_at")) or current
+            if opened is not None and closed > day_start and opened < day_end:
+                windows.append((opened, closed))
+        if not windows:
+            return self.sessions_for_period(selected_day, selected_day)
+
+        candidates = self.sessions_for_period(
+            min(opened for opened, _ in windows).date(),
+            max(closed for _, closed in windows).date(),
+        )
+        result = []
+        for item in candidates:
+            opened = parsed(item.get("started_at"))
+            closed = parsed(item.get("ended_at")) or current
+            if opened is None:
+                continue
+            if any(
+                closed > window_start and opened < window_end
+                for window_start, window_end in windows
+            ):
+                result.append(dict(item))
+        return sorted(
+            result, key=lambda item: item["started_at"], reverse=True,
+        )
 
     @staticmethod
     def _limit_moment(when=None):
@@ -1536,6 +2501,7 @@ class AppUsageStore:
         if granted and not extension_used:
             state["extension_granted_at"] = None
         if expired or (granted and not extension_used):
+            self._mark_sqlite_dict("app_limit_rolling", target_key)
             self._dirty = True
         return state, moment, extension_used
 
@@ -1546,14 +2512,32 @@ class AppUsageStore:
     def app_limit_settings(self, target_key, defaults=None):
         defaults = dict(defaults or {})
         saved = self.data.setdefault("app_limit_settings", {}).get(target_key, {})
+        extension_seconds = int(saved.get("extension_seconds", defaults.get("extension_seconds", 60)))
+        extension_unit = str(saved.get("extension_unit", defaults.get("extension_unit", "")))
+        if extension_unit not in {"seconds", "minutes", "hours"}:
+            extension_unit = (
+                "hours" if extension_seconds >= 3600 and extension_seconds % 3600 == 0
+                else "minutes" if extension_seconds >= 60 and extension_seconds % 60 == 0
+                else "seconds"
+            )
         valid_from = str(saved.get("valid_from", defaults.get("valid_from", "")))
         valid_until = str(saved.get("valid_until", defaults.get("valid_until", "")))
         return {
+            "managed_by": "backend" if saved.get("managed_by", defaults.get("managed_by")) == "backend" else "local",
+            "name": str(saved.get("name", defaults.get("name", ""))).strip(),
             "enabled": bool(saved.get("enabled", defaults.get("enabled", True))),
+            "enforcement_action": (
+                "warn" if saved.get(
+                    "enforcement_action",
+                    defaults.get("enforcement_action", "block"),
+                ) == "warn" else "block"
+            ),
             "target_key": str(saved.get("target_key", defaults.get("target_key", target_key))),
+            "delete_after_expiry": bool(saved.get("delete_after_expiry", defaults.get("delete_after_expiry", True))),
             "block_during_validity": bool(saved.get("block_during_validity", defaults.get("block_during_validity", False))),
             "limit_seconds": int(saved.get("limit_seconds", defaults.get("limit_seconds", 60))),
-            "extension_seconds": int(saved.get("extension_seconds", defaults.get("extension_seconds", 60))),
+            "extension_seconds": extension_seconds,
+            "extension_unit": extension_unit,
             "warning_seconds": int(saved.get("warning_seconds", defaults.get("warning_seconds", 15))),
             "blocked_after": str(saved.get("blocked_after", defaults.get("blocked_after", ""))),
             "schedule_date": str(saved.get("schedule_date", defaults.get("schedule_date", ""))),
@@ -1565,14 +2549,33 @@ class AppUsageStore:
             "schedule_end": str(saved.get("schedule_end", defaults.get("schedule_end", ""))),
         }
 
-    def set_app_limit_settings(self, target_key, settings):
+    @staticmethod
+    def normalize_app_limit_settings(target_key, settings):
         measured_target = str(settings.get("target_key") or target_key).strip()
+        name = str(settings.get("name", "")).strip()
+        if len(name) > 120:
+            raise ValueError("Le nom de la limitation ne peut pas dépasser 120 caractères.")
+        extension_seconds = max(0, int(settings.get("extension_seconds", 60)))
+        extension_unit = str(settings.get("extension_unit", ""))
+        if extension_unit not in {"minutes", "hours"}:
+            extension_unit = (
+                "hours" if extension_seconds >= 3600 and extension_seconds % 3600 == 0
+                else "minutes" if extension_seconds >= 60 and extension_seconds % 60 == 0
+                else "seconds"
+            )
         normalized = {
+            "managed_by": "backend" if settings.get("managed_by") == "backend" else "local",
+            "name": name,
             "enabled": bool(settings.get("enabled", True)),
+            "enforcement_action": (
+                "warn" if settings.get("enforcement_action") == "warn" else "block"
+            ),
             "target_key": measured_target,
+            "delete_after_expiry": bool(settings.get("delete_after_expiry", True)),
             "block_during_validity": bool(settings.get("block_during_validity", False)),
             "limit_seconds": max(1, int(settings.get("limit_seconds", 60))),
-            "extension_seconds": max(0, int(settings.get("extension_seconds", 60))),
+            "extension_seconds": extension_seconds,
+            "extension_unit": extension_unit,
             "warning_seconds": max(1, int(settings.get("warning_seconds", 15))),
             "blocked_after": str(settings.get("blocked_after", "")).strip(),
             "schedule_date": str(settings.get("schedule_date", "")).strip(),
@@ -1643,10 +2646,352 @@ class AppUsageStore:
         normalized["warning_seconds"] = min(
             normalized["warning_seconds"], normalized["limit_seconds"]
         )
+        return normalized
+
+    def set_app_limit_settings(self, target_key, settings):
+        normalized = self.normalize_app_limit_settings(target_key, settings)
         self.data.setdefault("app_limit_settings", {})[target_key] = normalized
         self._dirty = True
         self.save(force=True)
         return normalized
+
+    def dismiss_target(self, key):
+        """Hide one program from classification until its next real launch."""
+        key = str(key).strip()
+        if not key.startswith("app:"):
+            raise ValueError("Seules les applications peuvent être retirées du classement.")
+        running = any(
+            session.get("kind") == "program" and session.get("key") == key
+            for session in self.data.get("open_sessions", {}).values()
+        )
+        self.data.setdefault("dismissed_targets", {})[key] = (
+            "running" if running else "awaiting_launch"
+        )
+        self._dirty = True
+        self.save(force=True)
+
+    def is_target_dismissed(self, key):
+        return str(key) in self.data.get("dismissed_targets", {})
+
+    def observe_program_inventory(self, target_keys):
+        """Advance dismissed programs only from a complete process inventory."""
+        running = {str(key) for key in target_keys if str(key)}
+        dismissed = self.data.setdefault("dismissed_targets", {})
+        changed = False
+        for key, phase in list(dismissed.items()):
+            if phase == "running":
+                if key not in running:
+                    dismissed[key] = "awaiting_launch"
+                    changed = True
+            elif key in running:
+                dismissed.pop(key, None)
+                changed = True
+        if changed:
+            self._dirty = True
+            self.save(force=True)
+        return changed
+
+    @staticmethod
+    def _backend_activity_interval(session):
+        """Build one compact idempotent timeline row; never serialize history."""
+        source = dict(session or {})
+        kind = str(source.get("kind") or "").strip()
+        sid = str(source.get("windows_sid") or "").strip().upper()
+        started_at = str(source.get("started_at") or "").strip()
+        ended_at = str(source.get("ended_at") or "").strip()
+        target_key = str(source.get("key") or "").strip()
+        if (
+            not kind or not sid.startswith("S-1-")
+            or not started_at or not ended_at
+            or not target_key
+        ):
+            return None
+        try:
+            opened = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            closed = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+            revision = max(0, int(source.get("policy_revision") or 0))
+        except (TypeError, ValueError):
+            return None
+        if opened.tzinfo is None or closed.tzinfo is None or closed <= opened:
+            return None
+        category_key = str(source.get("category") or "").strip()
+        category_keys = list(dict.fromkeys(
+            str(category).strip()
+            for category in source.get("category_lineage", [])
+            if str(category).strip()
+        ))
+        if category_key and category_key not in category_keys:
+            category_keys.insert(0, category_key)
+        usage_identity = json.dumps([
+            sid, source.get("windows_session_id"), source.get("id"),
+            target_key, category_keys, started_at, ended_at, revision,
+        ], ensure_ascii=False, separators=(",", ":"))
+        timeline_identity = json.dumps([
+            kind, sid, source.get("windows_session_id"), source.get("id"),
+            target_key, str(source.get("label") or ""), category_keys,
+            started_at, ended_at, revision,
+        ], ensure_ascii=False, separators=(",", ":"))
+        result = {
+            "record_id": "timeline-" + hashlib.sha256(
+                timeline_identity.encode("utf-8")
+            ).hexdigest(),
+            "kind": kind, "id": str(source.get("id") or ""),
+            "windows_sid": sid, "key": target_key,
+            "label": str(source.get("label") or target_key),
+            "category": category_key, "category_lineage": category_keys,
+            "started_at": started_at, "ended_at": ended_at,
+            "windows_session_id": source.get("windows_session_id"),
+            "started_before_tracking": bool(
+                source.get("started_before_tracking", False)
+            ),
+            "source": str(source.get("source") or "monitor"),
+            "policy_revision": revision,
+        }
+        if kind == "active":
+            result["interval_id"] = "activity-" + hashlib.sha256(
+                usage_identity.encode("utf-8")
+            ).hexdigest()
+        return result
+
+    def _append_backend_activity_interval(self, session):
+        interval = self._backend_activity_interval(session)
+        if interval is None:
+            return False
+        with self._activity_outbox_lock:
+            try:
+                self.activity_outbox_path.parent.mkdir(parents=True, exist_ok=True)
+                encoded = json.dumps(
+                    interval, ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8") + b"\n"
+                with self.activity_outbox_path.open("ab") as stream:
+                    stream.write(encoded)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except OSError:
+                return False
+        return True
+
+    def _purge_synthetic_other_sites_sessions(self):
+        """Remove aggregate browser sentinels from the durable timeline.
+
+        Daily usage and per-host ``other_site_days`` are separate SQLite
+        sections and deliberately remain untouched.  Running this filter on
+        every startup makes the migration naturally idempotent.
+        """
+        try:
+            backfill_version = int(
+                self.data.get("backend_activity_backfill_version") or 0
+            )
+        except (TypeError, ValueError):
+            backfill_version = 0
+        if backfill_version < BACKEND_ACTIVITY_BACKFILL_VERSION:
+            # If the durable interval journal could not be written, retain
+            # the source rows so the next startup can safely retry first.
+            return False
+        sessions = self.data.setdefault("sessions", [])
+        retained = [
+            session for session in sessions
+            if not (
+                isinstance(session, dict)
+                and session.get("ended_at")
+                and is_other_sites_aggregate_key(session.get("key"))
+            )
+        ]
+        if len(retained) == len(sessions):
+            return False
+        self.data["sessions"] = retained
+        self._mark_sqlite_full("sessions")
+        return True
+
+    def _ensure_recent_backend_activity_backfill(self):
+        """Replay only a bounded recent window into the durable outbox once.
+
+        This repairs gaps left by pre-outbox builds without ever serializing or
+        transferring the growing activity archive.  Record identifiers are
+        deterministic, so both the local broker and the server deduplicate a
+        replay that was already received.
+        """
+        try:
+            current_version = int(
+                self.data.get("backend_activity_backfill_version") or 0
+            )
+        except (TypeError, ValueError):
+            current_version = 0
+        if current_version >= BACKEND_ACTIVITY_BACKFILL_VERSION:
+            return False
+
+        cutoff = datetime.now().astimezone() - timedelta(
+            days=BACKEND_ACTIVITY_BACKFILL_DAYS
+        )
+        records = {}
+        for source in self.data.get("sessions", []):
+            if not isinstance(source, dict) or not source.get("ended_at"):
+                continue
+            try:
+                closed = datetime.fromisoformat(
+                    str(source["ended_at"]).replace("Z", "+00:00")
+                )
+                if closed.tzinfo is None:
+                    closed = closed.astimezone()
+            except (TypeError, ValueError):
+                continue
+            if closed < cutoff:
+                continue
+            interval = self._backend_activity_interval(source)
+            if interval is not None:
+                records[interval["record_id"]] = interval
+
+        encoded_records = []
+        encoded_bytes = 0
+        ordered = sorted(
+            records.values(),
+            key=lambda item: str(item.get("ended_at") or ""),
+            reverse=True,
+        )
+        for interval in ordered:
+            encoded = json.dumps(
+                interval, ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8") + b"\n"
+            if (
+                len(encoded_records) >= BACKEND_ACTIVITY_BACKFILL_MAX_RECORDS
+                or encoded_bytes + len(encoded)
+                > BACKEND_ACTIVITY_BACKFILL_MAX_BYTES
+            ):
+                break
+            encoded_records.append(encoded)
+            encoded_bytes += len(encoded)
+
+        if encoded_records:
+            # Preserve chronological order inside the append-only outbox.
+            payload = b"".join(reversed(encoded_records))
+            with self._activity_outbox_lock:
+                try:
+                    self.activity_outbox_path.parent.mkdir(
+                        parents=True, exist_ok=True
+                    )
+                    with self.activity_outbox_path.open("ab") as stream:
+                        stream.write(payload)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                except OSError:
+                    return False
+
+        self.data["backend_activity_backfill_version"] = (
+            BACKEND_ACTIVITY_BACKFILL_VERSION
+        )
+        return True
+
+    def pending_backend_activity_intervals(
+        self, max_items=500, max_bytes=512 * 1024,
+    ):
+        """Read a bounded outbox page after the last durably acknowledged byte."""
+        with self._activity_outbox_lock:
+            max_items = max(1, min(500, int(max_items)))
+            max_bytes = max(1024, min(512 * 1024, int(max_bytes)))
+            try:
+                state = json.loads(
+                    self.activity_outbox_state_path.read_text(encoding="utf-8")
+                )
+                cursor = max(0, int(state.get("cursor") or 0))
+            except (OSError, TypeError, ValueError):
+                cursor = 0
+            intervals, used, next_cursor = [], 0, cursor
+            try:
+                with self.activity_outbox_path.open("rb") as stream:
+                    size = stream.seek(0, os.SEEK_END)
+                    if cursor > size:
+                        cursor = next_cursor = 0
+                    stream.seek(cursor)
+                    while len(intervals) < max_items:
+                        line = stream.readline()
+                        if not line:
+                            break
+                        if intervals and used + len(line) > max_bytes:
+                            break
+                        if len(line) > max_bytes:
+                            # A valid interval is tiny. Skip a corrupt oversized
+                            # line so it cannot permanently block newer records.
+                            next_cursor = stream.tell()
+                            continue
+                        try:
+                            item = json.loads(line.decode("utf-8"))
+                        except (UnicodeDecodeError, json.JSONDecodeError):
+                            next_cursor = stream.tell()
+                            continue
+                        if isinstance(item, dict):
+                            intervals.append(item)
+                            used += len(line)
+                        next_cursor = stream.tell()
+            except OSError:
+                pass
+            return {
+                "intervals": intervals, "cursor": next_cursor,
+                "bytes": used,
+            }
+
+    def acknowledge_backend_activity_intervals(self, cursor):
+        """Advance the desktop cursor only after the service persisted the page."""
+        with self._activity_outbox_lock:
+            cursor = max(0, int(cursor or 0))
+            try:
+                size = self.activity_outbox_path.stat().st_size
+            except OSError:
+                size = 0
+            if cursor > size:
+                raise ValueError("Curseur d’activité invalide.")
+            if cursor == 0:
+                return 0
+
+            # This is a two-file transaction.  Persisting zero *before* the
+            # JSONL replacement makes every possible crash conservative:
+            # either the old file is reread from byte zero (duplicates), or
+            # the compacted tail is read from byte zero.  Both are idempotent;
+            # retaining an older non-zero cursor beside a replaced tail could
+            # instead skip unacknowledged records forever.
+            with self.activity_outbox_path.open("rb") as stream:
+                stream.seek(cursor)
+                tail = stream.read()
+            outbox_temporary = self.activity_outbox_path.with_suffix(".tmp")
+            state_temporary = self.activity_outbox_state_path.with_suffix(".tmp")
+            try:
+                with outbox_temporary.open("wb") as stream:
+                    stream.write(tail)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                self.activity_outbox_state_path.parent.mkdir(
+                    parents=True, exist_ok=True,
+                )
+                with state_temporary.open("wb") as stream:
+                    stream.write(b'{"cursor":0}')
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                state_temporary.replace(self.activity_outbox_state_path)
+                # Compaction is mandatory.  If replacement fails, propagate
+                # the error so the bridge does not treat the desktop ACK as
+                # successful.  The durable zero causes a harmless replay of
+                # the already persisted prefix on the next attempt.
+                outbox_temporary.replace(self.activity_outbox_path)
+            finally:
+                try:
+                    outbox_temporary.unlink(missing_ok=True)
+                    state_temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return 0
+
+    def pending_backend_daily_aggregates(
+        self, max_days=31, max_metrics=500, max_bytes=320 * 1024,
+    ):
+        """Return bounded analysis totals only, never local raw sessions."""
+        return self._activity_sqlite.pending_daily_aggregates(
+            max_days=max_days, max_metrics=max_metrics,
+            max_bytes=max_bytes,
+        )
+
+    def acknowledge_backend_daily_aggregates(self, aggregate_ids):
+        return self._activity_sqlite.acknowledge_daily_aggregates(
+            aggregate_ids
+        )
 
     def remove_app_limit_settings(self, target_key):
         self.data.setdefault("app_limit_settings", {}).pop(target_key, None)
@@ -1655,6 +3000,8 @@ class AppUsageStore:
         self.data.setdefault("app_limit_rolling", {}).pop(target_key, None)
         if target_key in self.data.setdefault("app_limit_rolling_migrated", []):
             self.data["app_limit_rolling_migrated"].remove(target_key)
+        self._mark_sqlite_full("app_limit_days")
+        self._mark_sqlite_dict("app_limit_rolling", target_key)
         self._dirty = True
         self.save(force=True)
 
@@ -1668,13 +3015,23 @@ class AppUsageStore:
         migrated = self.data.setdefault("app_limit_rolling_migrated", [])
         if target_key not in migrated:
             migrated.append(target_key)
+        self._mark_sqlite_dict("app_limit_rolling", target_key)
         self._dirty = True
         self.save(force=True)
 
     def prepare_app_limit(self, target_key, limit_seconds, extension_seconds, when=None, measured_target_key=None):
         """Initialize a limit from activity already measured in its rolling window."""
         state, moment, _ = self._rolling_limit_state(target_key, when)
-        if int(state.get("usage_seed_version", 0)) >= 4:
+        seeded_day = None
+        try:
+            seeded_at = datetime.fromisoformat(str(state.get("usage_seeded_at") or ""))
+            seeded_day = seeded_at.astimezone(moment.tzinfo).date()
+        except ValueError:
+            pass
+        if (
+            int(state.get("usage_seed_version", 0)) >= 4
+            and seeded_day == moment.date()
+        ):
             return
         seed_start = datetime.combine(moment.date(), datetime.min.time()).replace(
             tzinfo=moment.tzinfo
@@ -1686,6 +3043,7 @@ class AppUsageStore:
         )
         state["usage_seeded_at"] = moment.isoformat(timespec="seconds")
         state["usage_seed_version"] = 4
+        self._mark_sqlite_dict("app_limit_rolling", target_key)
         self._dirty = True
         self.save(force=True)
 
@@ -1721,6 +3079,7 @@ class AppUsageStore:
         state, moment, _ = self._rolling_limit_state(target_key, when)
         bucket = moment.replace(second=0, microsecond=0).isoformat(timespec="minutes")
         state["buckets"][bucket] = round(float(state["buckets"].get(bucket, 0.0)) + seconds, 3)
+        self._mark_sqlite_dict("app_limit_rolling", target_key)
         self._dirty = True
         return self.app_limit_state_for_day(target_key, when)
 
@@ -1729,6 +3088,7 @@ class AppUsageStore:
         if extension_used:
             return False
         state["extension_granted_at"] = moment.isoformat(timespec="seconds")
+        self._mark_sqlite_dict("app_limit_rolling", target_key)
         self._dirty = True
         self.save(force=True)
         return True
@@ -1762,65 +3122,292 @@ class AppUsageStore:
             self._dirty = True
             self.save(force=True)
 
+    @staticmethod
+    def _target_limit_keys(data, target_key):
+        """Return every rule measuring ``target_key``, including UUID copies."""
+        target_key = str(target_key or "").strip()
+        settings = dict(dict(data or {}).get("app_limit_settings") or {})
+        return {
+            str(rule_key)
+            for rule_key, raw_policy in settings.items()
+            if (
+                str(rule_key) == target_key
+                or str(
+                    (raw_policy or {}).get("target_key")
+                    if isinstance(raw_policy, dict) else ""
+                ).strip() == target_key
+            )
+        }
+
+    @classmethod
+    def _purge_target_document(cls, data, key):
+        """Remove one target from an in-memory current or legacy document.
+
+        The helper deliberately mutates only the supplied document.  It is
+        shared by the authoritative SQLite-backed store and the one-off
+        sanitisation of the frozen migration source, so a rollback cannot
+        resurrect history which the user explicitly deleted.
+        """
+        if not isinstance(data, dict):
+            return set()
+        key = str(key or "").strip()
+        if not key:
+            return set()
+
+        days = data.setdefault("days", {})
+        if not isinstance(days, dict):
+            days = data["days"] = {}
+        for apps in days.values():
+            if isinstance(apps, dict):
+                apps.pop(key, None)
+
+        other_sites_browser = _other_sites_browser(key)
+        site_browser, site_host = _browser_site_parts(key)
+        other_site_days = data.setdefault("other_site_days", {})
+        if not isinstance(other_site_days, dict):
+            other_site_days = data["other_site_days"] = {}
+        if other_sites_browser:
+            other_site_days.pop(other_sites_browser, None)
+        elif site_browser and site_host:
+            browser_days = other_site_days.get(site_browser)
+            if isinstance(browser_days, dict):
+                grouped_key = f"site:{site_browser}:other-sites"
+                for day, hosts in list(browser_days.items()):
+                    if not isinstance(hosts, dict):
+                        continue
+                    try:
+                        removed_seconds = float(hosts.pop(site_host, 0.0) or 0.0)
+                    except (TypeError, ValueError):
+                        removed_seconds = 0.0
+                    if removed_seconds:
+                        apps = days.get(day)
+                        if isinstance(apps, dict) and grouped_key in apps:
+                            try:
+                                remaining = round(
+                                    float(apps.get(grouped_key, 0.0))
+                                    - removed_seconds,
+                                    3,
+                                )
+                            except (TypeError, ValueError):
+                                remaining = 0.0
+                            if remaining > 0:
+                                apps[grouped_key] = remaining
+                            else:
+                                apps.pop(grouped_key, None)
+                    if not hosts:
+                        browser_days.pop(day, None)
+                if not browser_days:
+                    other_site_days.pop(site_browser, None)
+
+        targets = data.setdefault("targets", {})
+        if isinstance(targets, dict):
+            targets.pop(key, None)
+        for list_field in ("target_order", "excluded", "excluded_sites"):
+            values = data.setdefault(list_field, [])
+            if isinstance(values, list):
+                data[list_field] = [value for value in values if value != key]
+        merged_targets = data.setdefault("merged_targets", {})
+        if isinstance(merged_targets, dict):
+            data["merged_targets"] = {
+                source: destination
+                for source, destination in merged_targets.items()
+                if source != key and destination != key
+            }
+        dismissed = data.setdefault("dismissed_targets", {})
+        if isinstance(dismissed, dict):
+            dismissed.pop(key, None)
+
+        if site_browser and site_host:
+            specific = data.setdefault("browser_specific_sites", {})
+            if isinstance(specific, dict):
+                sites = specific.get(site_browser)
+                if isinstance(sites, list):
+                    specific[site_browser] = [
+                        host for host in sites if host != site_host
+                    ]
+
+        removed_limit_keys = cls._target_limit_keys(data, key)
+        # An active personal-policy overlay keeps the former local rules as a
+        # restoration backup.  Include them before counters are purged or an
+        # offline fallback could resurrect both the rule and its quota state.
+        overlay = data.setdefault("personal_policy_overlay", {})
+        if isinstance(overlay, dict):
+            local_settings = overlay.get("local_settings")
+            if isinstance(local_settings, dict):
+                overlay_removed = cls._target_limit_keys(
+                    {"app_limit_settings": local_settings}, key,
+                )
+                for rule_key in overlay_removed:
+                    local_settings.pop(rule_key, None)
+                removed_limit_keys.update(overlay_removed)
+        settings = data.setdefault("app_limit_settings", {})
+        if isinstance(settings, dict):
+            for rule_key in removed_limit_keys:
+                settings.pop(rule_key, None)
+        limit_days = data.setdefault("app_limit_days", {})
+        if isinstance(limit_days, dict):
+            for states in limit_days.values():
+                if isinstance(states, dict):
+                    for rule_key in removed_limit_keys:
+                        states.pop(rule_key, None)
+        rolling = data.setdefault("app_limit_rolling", {})
+        if isinstance(rolling, dict):
+            for rule_key in removed_limit_keys:
+                rolling.pop(rule_key, None)
+        migrated = data.setdefault("app_limit_rolling_migrated", [])
+        if isinstance(migrated, list):
+            data["app_limit_rolling_migrated"] = [
+                rule_key for rule_key in migrated
+                if str(rule_key) not in removed_limit_keys
+            ]
+
+        rules = data.setdefault("notification_rules", [])
+        if isinstance(rules, list):
+            data["notification_rules"] = [
+                rule for rule in rules
+                if not isinstance(rule, dict)
+                or str(rule.get("target_key") or "")
+                not in removed_limit_keys | {key}
+            ]
+
+        sessions = data.setdefault("sessions", [])
+        if isinstance(sessions, list):
+            data["sessions"] = [
+                session for session in sessions
+                if not isinstance(session, dict)
+                or str(session.get("key") or "") != key
+            ]
+        open_sessions = data.setdefault("open_sessions", {})
+        if isinstance(open_sessions, dict):
+            for session_id, session in list(open_sessions.items()):
+                if (
+                    isinstance(session, dict)
+                    and str(session.get("key") or "") == key
+                ):
+                    open_sessions.pop(session_id, None)
+        return removed_limit_keys
+
+    def _purge_target_activity_outbox(self, key):
+        """Atomically drop unsent raw rows for a permanently deleted target."""
+        key = str(key or "").strip()
+        if not key:
+            return 0
+        with self._activity_outbox_lock:
+            try:
+                original = self.activity_outbox_path.read_bytes()
+            except FileNotFoundError:
+                return 0
+            kept, removed = [], 0
+            for line in original.splitlines(keepends=True):
+                try:
+                    item = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    kept.append(line)
+                    continue
+                if isinstance(item, dict) and str(
+                    item.get("key") or item.get("target_key") or ""
+                ) == key:
+                    removed += 1
+                else:
+                    kept.append(line)
+            if not removed:
+                return 0
+            outbox_temporary = self.activity_outbox_path.with_suffix(
+                ".delete-target.tmp"
+            )
+            state_temporary = self.activity_outbox_state_path.with_suffix(
+                ".delete-target.tmp"
+            )
+            try:
+                with outbox_temporary.open("wb") as stream:
+                    stream.write(b"".join(kept))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                self.activity_outbox_state_path.parent.mkdir(
+                    parents=True, exist_ok=True,
+                )
+                with state_temporary.open("wb") as stream:
+                    stream.write(b'{"cursor":0}')
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                # A zero cursor before replacement is crash-conservative: an
+                # interrupted operation can replay rows, never skip them.
+                state_temporary.replace(self.activity_outbox_state_path)
+                outbox_temporary.replace(self.activity_outbox_path)
+            finally:
+                outbox_temporary.unlink(missing_ok=True)
+                state_temporary.unlink(missing_ok=True)
+            return removed
+
+    def _sanitize_legacy_activity_file(self, key):
+        """Rewrite the frozen migration source once, without a second archive."""
+        if not self.path.exists():
+            return False
+        try:
+            legacy = json.loads(self.path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RuntimeError(
+                "L’ancienne archive d’activité ne peut pas être assainie."
+            ) from error
+        if not isinstance(legacy, dict):
+            raise RuntimeError(
+                "L’ancienne archive d’activité ne peut pas être assainie."
+            )
+        self._purge_target_document(legacy, key)
+        temporary = self.path.with_suffix(".delete-target.tmp")
+        try:
+            encoded = json.dumps(
+                legacy, ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            with temporary.open("wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(self.path)
+        except OSError as error:
+            raise RuntimeError(
+                "L’ancienne archive d’activité ne peut pas être assainie."
+            ) from error
+        finally:
+            temporary.unlink(missing_ok=True)
+        return True
+
     def delete_target(self, key):
         """Permanently remove the recorded history and settings for a target."""
-        key = str(key)
-        browser = _other_sites_browser(key)
-        if browser:
-            for apps in self.data["days"].values():
-                apps.pop(key, None)
-            self.data.get("other_site_days", {}).pop(browser, None)
-        else:
-            for apps in self.data["days"].values():
-                apps.pop(key, None)
-            browser, host = _browser_site_parts(key)
-            if browser and host:
-                sites = self.data.get("browser_specific_sites", {}).get(browser, [])
-                if host in sites:
-                    sites.remove(host)
-                if key in self.data.get("excluded_sites", []):
-                    self.data["excluded_sites"].remove(key)
-        self.data["targets"].pop(key, None)
-        if key in self.data["excluded"]:
-            self.data["excluded"].remove(key)
-        self.data.get("merged_targets", {}).pop(key, None)
-        self.data["sessions"] = [
-            session for session in self.data.get("sessions", [])
-            if session.get("key") != key
-        ]
-        for session_id, session in list(self.data.get("open_sessions", {}).items()):
-            if session.get("key") == key:
-                self.data["open_sessions"].pop(session_id, None)
+        key = str(key).strip()
+        if not key:
+            raise ValueError("Cible de tranche invalide.")
+        removed_limit_keys = self._purge_target_document(self.data, key)
+        self._recent_closed_sessions = deque(
+            (
+                session for session in self._recent_closed_sessions
+                if str(session.get("key") or "") != key
+            ),
+            maxlen=self._recent_closed_sessions.maxlen,
+        )
+        self._purge_target_activity_outbox(key)
+        self._mark_sqlite_full(
+            "days", "other_site_days", "sessions", "open_sessions",
+            "app_limit_days",
+        )
+        for rule_key in removed_limit_keys | {key}:
+            self._mark_sqlite_dict("app_limit_rolling", rule_key)
         self._dirty = True
         self.save(force=True)
+        # SQLite owns current data, but the pre-migration JSON is retained as
+        # a rollback source.  Sanitize that exact file atomically on this rare
+        # explicit action; it is never uploaded and no backup copy is made.
+        self._sanitize_legacy_activity_file(key)
+        return sorted(removed_limit_keys)
 
     def delete_browser_site(self, browser, host):
         """Permanently remove one host from the aggregated browser history."""
         browser = str(browser).lower()
         host = _site_host(host) or str(host).lower().strip()
         if not browser or not host:
-            return
-        specific_key = f"site:{browser}:{host}"
-        for day, hosts in self.data.get("other_site_days", {}).get(browser, {}).items():
-            seconds = float(hosts.pop(host, 0.0))
-            if not seconds:
-                continue
-            apps = self.data["days"].setdefault(day, {})
-            grouped_key = f"site:{browser}:other-sites"
-            apps[grouped_key] = round(float(apps.get(grouped_key, 0.0)) - seconds, 3)
-            if apps[grouped_key] <= 0:
-                apps.pop(grouped_key, None)
-        for apps in self.data["days"].values():
-            apps.pop(specific_key, None)
-        sites = self.data.get("browser_specific_sites", {}).get(browser, [])
-        if host in sites:
-            sites.remove(host)
-        self.data["targets"].pop(specific_key, None)
-        for excluded_key in ("excluded", "excluded_sites"):
-            if specific_key in self.data.get(excluded_key, []):
-                self.data[excluded_key].remove(specific_key)
-        self._dirty = True
-        self.save(force=True)
+            return []
+        return self.delete_target(f"site:{browser}:{host}")
 
     def excluded_targets(self):
         return [
@@ -1833,7 +3420,7 @@ class AppUsageStore:
 
     def merge_candidates(self, source_key):
         keys = set(self.data["targets"])
-        for apps in self.data["days"].values():
+        for day, apps in self.data["days"].items():
             keys.update(apps)
         return [
             UsageTarget(
@@ -1855,6 +3442,10 @@ class AppUsageStore:
                 float(apps.get(destination_key, 0.0)) + float(apps.pop(source_key)), 3
             )
         source_metadata = self.data["targets"].pop(source_key, {})
+        order = self.data.setdefault("target_order", [])
+        order[:] = list(dict.fromkeys(
+            destination_key if saved == source_key else saved for saved in order
+        ))
         destination_metadata = self.data["targets"].setdefault(destination_key, {})
         for key, value in source_metadata.items():
             destination_metadata.setdefault(key, value)
@@ -1874,6 +3465,7 @@ class AppUsageStore:
             if session.get("key") == source_key:
                 session["key"] = destination_key
                 session["label"] = destination_label
+        self._mark_sqlite_full("days", "sessions", "open_sessions")
         self._dirty = True
         self.save(force=True)
 
@@ -1903,17 +3495,16 @@ class AppUsageStore:
         if browser and (
             metadata.get("category_scope") == "site" or _is_youtube_host(host)
         ):
-            # Some browser hosts (notably localhost) are presented as
-            # independent applications. YouTube is likewise tracked as its
-            # own activity. Moving one must therefore change its top-level
-            # category, not create a browser sub-category.
+            # Removing a site from a general category puts it back below the
+            # plural Sites branch. It must never become an unclassified app.
             metadata.pop("root", None)
             previous_site_category = metadata.pop("site_category", None)
             metadata["category_scope"] = "site"
             if category:
                 metadata["category"] = category
             else:
-                metadata["category"] = "Applications non classées"
+                metadata["category"] = "__root__"
+                metadata.pop("category_scope", None)
             self._remove_unused_site_category(previous_site_category)
             self._dirty = True
             self.save(force=True)
@@ -1925,7 +3516,7 @@ class AppUsageStore:
                 if category not in saved_categories:
                     saved_categories.append(category)
                 metadata.setdefault(
-                    "category", self.data.get("browser_categories", {}).get(browser, _browser_label(browser))
+                    "category", self.data.get("browser_categories", {}).get(browser, "__root__")
                 )
             else:
                 metadata.pop("site_category", None)
@@ -2180,7 +3771,7 @@ class AppUsageStore:
         self.save(force=True)
 
     def categories(self):
-        categories = set(self.data.get("browser_categories", {}).values())
+        categories = set()
         categories.update(self.data.get("site_categories", []))
         parents = self.data.get("category_parents", {})
         categories.update(parents)
@@ -2201,13 +3792,17 @@ class AppUsageStore:
 
     def top_level_categories(self):
         """Return every known main category, including categories idle today."""
-        categories = set(self.data.get("browser_categories", {}).values())
+        categories = set()
         parents = self.data.get("category_parents", {})
         categories.update(parents)
         categories.update(parents.values())
         categories.update(
             metadata.get("category", "")
-            for metadata in self.data["targets"].values()
+            for key, metadata in self.data["targets"].items()
+            if (
+                not _browser_for_target(key)
+                or metadata.get("category_scope") == "site"
+            )
         )
         known = {
             category for category in categories
@@ -2218,6 +3813,169 @@ class AppUsageStore:
         ordered = [category for category in saved_order if category in known]
         ordered.extend(sorted(known.difference(ordered)))
         return ordered
+
+    def add_catalog_item(self, kind, identifier, label="", browser="brave.exe", parent=""):
+        """Add a classification item without recording any usage.
+
+        Applications are keyed by their executable basename so that a later
+        foreground observation resolves to the same target. Sites are keyed by
+        browser and host. An empty category is persisted through
+        ``category_parents`` and therefore remains available for drag and drop.
+        """
+        kind = str(kind or "").strip().lower()
+        identifier = str(identifier or "").strip()
+        label = str(label or "").strip()
+        parent = str(parent or "").strip()
+        if kind not in {"category", "application", "site"}:
+            raise ValueError("Type d’élément inconnu.")
+        if not identifier or any(ord(character) < 32 for character in identifier):
+            raise ValueError("Indiquez un nom ou un identifiant valide.")
+
+        if kind == "category":
+            category = " ".join(identifier.split())
+            if len(category) > 80:
+                raise ValueError("Le nom de la catégorie est trop long.")
+            if category in {"__root__", "Applications non classées"}:
+                raise ValueError("Ce nom de catégorie est réservé.")
+            known = set(self.categories())
+            if parent and parent not in known:
+                raise ValueError("La catégorie parente n’existe pas.")
+            if parent == category:
+                raise ValueError("Une catégorie ne peut pas être sa propre parente.")
+            parents = self.data.setdefault("category_parents", {})
+            parents.setdefault(category, parent)
+            order = self.data.setdefault("category_order", [])
+            if category not in order:
+                order.append(category)
+            self._dirty = True
+            self.save(force=True)
+            return {"kind": kind, "category": category, "label": category}
+
+        if kind == "application":
+            executable = Path(identifier.strip('"')).name
+            if not executable.lower().endswith(".exe"):
+                executable += ".exe"
+            stem = Path(executable).stem.strip()
+            if not stem or len(executable) > 255:
+                raise ValueError("Le nom de l’exécutable est invalide.")
+            if executable.lower() in _browser_apps():
+                raise ValueError("Ajoutez les contenus d’un navigateur comme sites Internet.")
+            key = f"app:{stem.lower()}"
+            metadata = self.data.setdefault("targets", {}).setdefault(key, {})
+            metadata["label"] = label or stem
+            metadata["manual"] = True
+            metadata["executable"] = executable.lower()
+            self._dirty = True
+            self.save(force=True)
+            return {"kind": kind, "key": key, "label": metadata["label"]}
+
+        browser = Path(str(browser or "brave.exe")).name.lower()
+        if not browser.endswith(".exe"):
+            browser += ".exe"
+        candidate = identifier if "://" in identifier else f"https://{identifier}"
+        host = _site_host(candidate)
+        if not host:
+            raise ValueError("Le domaine ou l’adresse du site est invalide.")
+        self.make_browser_site_specific(browser, host, save=False)
+        key = f"site:{browser}:{host}"
+        metadata = self.data.setdefault("targets", {}).setdefault(key, {})
+        metadata["label"] = label or KNOWN_LOCAL_SITE_LABELS.get(host, host)
+        metadata.setdefault(
+            "category",
+            self.data.get("browser_categories", {}).get(browser, "__root__"),
+        )
+        metadata["manual"] = True
+        self._dirty = True
+        self.save(force=True)
+        return {"kind": kind, "key": key, "label": metadata["label"]}
+
+    def _target_display_parent(self, key):
+        """Return the classification branch containing one concrete target."""
+        key = str(key)
+        metadata = self.data.get("targets", {}).get(key, {})
+        browser, host = _browser_site_parts(key)
+        if (
+            browser and host
+            and str(metadata.get("category_scope") or "") != "site"
+        ):
+            return (
+                "sites", browser,
+                str(metadata.get("site_category") or "").strip(),
+            )
+        category = str(metadata.get("category") or "").strip()
+        if not category or category == "__root__":
+            category = "Applications non classées"
+        return ("category", category)
+
+    def reorder_target(
+        self, key, destination, before=True, displayed_siblings=None,
+    ):
+        """Reorder sibling activities without changing their classification."""
+        key = str(key).strip()
+        destination = str(destination).strip()
+        targets = self.data.get("targets", {})
+        if not key or not destination or key == destination:
+            return
+        if key not in targets or destination not in targets:
+            raise ValueError("Activité à réordonner introuvable.")
+        parent = self._target_display_parent(key)
+        if self._target_display_parent(destination) != parent:
+            raise ValueError(
+                "Seules les activités de la même catégorie peuvent être réordonnées."
+            )
+        valid = {
+            candidate for candidate in targets
+            if self._target_display_parent(candidate) == parent
+        }
+        supplied = list(displayed_siblings or [])
+        siblings = list(dict.fromkeys(
+            str(candidate) for candidate in supplied if str(candidate) in valid
+        ))
+        saved = self.data.setdefault("target_order", [])
+        siblings.extend(
+            candidate for candidate in saved
+            if candidate in valid and candidate not in siblings
+        )
+        siblings.extend(sorted(
+            valid.difference(siblings),
+            key=lambda candidate: str(
+                targets.get(candidate, {}).get("label") or candidate
+            ).casefold(),
+        ))
+        if key not in siblings or destination not in siblings:
+            raise ValueError("Ordre des activités incomplet.")
+        siblings.remove(key)
+        index = siblings.index(destination) + (0 if before else 1)
+        siblings.insert(index, key)
+        saved[:] = [candidate for candidate in saved if candidate not in valid]
+        saved.extend(siblings)
+        self._dirty = True
+        self.save(force=True)
+
+    def reorder_navigation(self, destination, before=True):
+        """Move the Web-navigation branch without changing classification."""
+        destination = str(destination or "").strip()
+        valid = set(self.top_level_categories()) | {"Applications non classées"}
+        if destination not in valid:
+            raise ValueError("Catégorie de destination introuvable.")
+        self.data["navigation_position"] = {
+            "destination": destination,
+            "before": bool(before),
+        }
+        self._dirty = True
+        self.save(force=True)
+
+    def reorder_unclassified(self, destination, before=True):
+        """Move the unclassified-app branch without reclassifying its apps."""
+        destination = str(destination or "").strip()
+        if destination not in set(self.top_level_categories()):
+            raise ValueError("Catégorie de destination introuvable.")
+        self.data["unclassified_position"] = {
+            "destination": destination,
+            "before": bool(before),
+        }
+        self._dirty = True
+        self.save(force=True)
 
     def category_order_key(self, category):
         """Return a stable display key, with manually ordered categories first."""
@@ -2308,23 +4066,95 @@ class AppUsageStore:
                 migrated = True
         return migrated
 
-    def save(self, force=False):
-        if not self._dirty and not force:
+    def _mark_sqlite_dict(self, section, key, *, daily=False):
+        if not hasattr(self, "_sqlite_dict_keys"):
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(".json.tmp")
-        persisted = copy.deepcopy(self.data)
-        for rule in persisted.get("notification_rules", []):
+        if section == "other_site_days":
+            raise ValueError("Utilisez _mark_sqlite_other_site.")
+        if section not in self._sqlite_dict_keys:
+            raise ValueError("Section SQLite inconnue.")
+        self._sqlite_dict_keys[section].add(str(key))
+        if daily:
+            self._sqlite_daily_days.add(str(key))
+
+    def _mark_sqlite_other_site(self, browser, day):
+        if not hasattr(self, "_sqlite_other_site_keys"):
+            return
+        self._sqlite_other_site_keys.add((str(browser), str(day)))
+
+    def _mark_sqlite_list_record(self, section, item, position):
+        if not hasattr(self, "_sqlite_list_records"):
+            return
+        if section not in self._sqlite_list_records:
+            raise ValueError("Section SQLite inconnue.")
+        # Identity by object is enough inside one save cycle and avoids
+        # serializing the historical list merely to discover what changed.
+        self._sqlite_list_records[section][id(item)] = (item, int(position))
+
+    def _mark_sqlite_full(self, *sections):
+        if not hasattr(self, "_sqlite_full_sections"):
+            return
+        for section in sections:
+            if section not in ACTIVITY_SECTIONS:
+                raise ValueError("Section SQLite inconnue.")
+            self._sqlite_full_sections.add(section)
+
+    def _reset_sqlite_changes(self):
+        self._sqlite_full_sections.clear()
+        for keys in self._sqlite_dict_keys.values():
+            keys.clear()
+        self._sqlite_other_site_keys.clear()
+        for records in self._sqlite_list_records.values():
+            records.clear()
+        self._sqlite_daily_days.clear()
+        self._sqlite_section_objects = {
+            section: id(self.data.get(section))
+            for section in ACTIVITY_SECTIONS
+        }
+
+    def _protected_configuration(self):
+        configuration = {
+            field: copy.deepcopy(value)
+            for field, value in self.data.items()
+            if field not in ACTIVITY_SECTIONS
+        }
+        for rule in configuration.get("notification_rules", []):
             recipient = str(rule.pop("email_recipient", "") or "").strip()
             if recipient:
                 rule["email_recipient_protected"] = (
                     self._protect_notification_recipient(recipient)
                 )
-        temporary.write_text(
-            json.dumps(persisted, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
+        return configuration
+
+    def save(self, force=False):
+        if not self._dirty and not force:
+            return
+        for section in ACTIVITY_SECTIONS:
+            if id(self.data.get(section)) != self._sqlite_section_objects.get(section):
+                self._sqlite_full_sections.add(section)
+        configuration = self._protected_configuration()
+        persisted = {**self.data, **configuration}
+        # ``activity.json`` is intentionally left byte-for-byte untouched in
+        # this migration release.  It is the rollback source, not a second
+        # growing archive.  Every subsequent mutation is committed only to
+        # the row-oriented SQLite database.
+        self._activity_sqlite.sync_changes(
+            persisted, configuration,
+            full_sections=self._sqlite_full_sections,
+            dict_keys=self._sqlite_dict_keys,
+            other_site_keys=self._sqlite_other_site_keys,
+            list_records={
+                section: list(records.values())
+                for section, records in self._sqlite_list_records.items()
+            },
+            daily_days=self._sqlite_daily_days,
+            refresh_all_daily=bool(
+                self._sqlite_full_sections.intersection({
+                    "days", "passive_days", "system_days",
+                })
+            ),
         )
-        os.replace(temporary, self.path)
+        self._reset_sqlite_changes()
         self._dirty = False
 
     def usage_for_day(self, when=None):
@@ -2424,7 +4254,7 @@ class UsageEntry:
 
 def configure_windows_autostart(enabled=True):
     """Register this program for the current user's Windows logon."""
-    if sys.platform != "win32":
+    if sys.platform != "win32" or not current_profile().allow_autostart_changes:
         return False
     try:
         import winreg
@@ -2515,9 +4345,9 @@ def _local_site_category(host):
         normalized = normalized.rsplit(":", 1)[0]
     if normalized not in {"localhost", "127.0.0.1", "::1"}:
         return ""
-    return str(
-        getattr(config, "LOCALHOST_CATEGORY", "Applications non classées")
-    ).strip()
+    # Loopback pages remain Web sites. ``__root__`` means they are displayed
+    # directly below the browser's plural “Sites” branch, never among apps.
+    return "__root__"
 
 
 def _browser_site_parts(key):
@@ -2544,6 +4374,8 @@ def _legacy_label(key):
 
 
 def _default_category(key, label):
+    if str(key).startswith("site:"):
+        return "__root__"
     executable = str(key).removeprefix("app:").lower()
     browser_apps = _browser_apps()
     for browser in browser_apps:

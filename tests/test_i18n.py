@@ -1,4 +1,5 @@
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,23 @@ class LanguagePreferenceTest(unittest.TestCase):
                     os.environ.pop("USAGE_GUARD_SETTINGS_PATH", None)
                 else:
                     os.environ["USAGE_GUARD_SETTINGS_PATH"] = previous
+
+    def test_all_marked_desktop_and_static_pwa_strings_are_translated(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(root / "tools" / "audit_i18n.py"),
+                "--root",
+                str(root),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

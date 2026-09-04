@@ -1,4 +1,5 @@
-const BRIDGE = "http://127.0.0.1:8765";
+const DEVELOPMENT = chrome.runtime.getManifest().version_name === "development";
+const BRIDGE = `http://127.0.0.1:${DEVELOPMENT ? 18765 : 8765}`;
 async function clearLegacyMute(tab) {
   if (
     tab.mutedInfo?.muted &&
@@ -22,7 +23,7 @@ function sourceUrl(url) {
   }
 }
 
-async function publishTab(tabOrId) {
+async function publishTab(tabOrId, pageMediaPlaying = false) {
   const tab = typeof tabOrId === "number"
     ? await chrome.tabs.get(tabOrId).catch(() => null)
     : tabOrId;
@@ -46,7 +47,11 @@ async function publishTab(tabOrId) {
     const response = await fetch(`${BRIDGE}/active`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({url, title: tab.title || "", audible: !!tab.audible})
+      body: JSON.stringify({
+        url,
+        title: tab.title || "",
+        audible: !!tab.audible || !!pageMediaPlaying
+      })
     });
     const payload = await response.json();
     await clearLegacyMute(tab);
@@ -95,7 +100,7 @@ chrome.tabs.onReplaced.addListener(() => publishOpenTabs());
 chrome.windows.onFocusChanged.addListener((windowId) => publishActiveTab(windowId));
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "usage-guard-active-tab") {
-    if (sender.tab?.active) publishTab(sender.tab);
+    if (sender.tab?.active) publishTab(sender.tab, !!message.playing);
     return;
   }
   if (message.type === "usage-guard-grant-extension") {

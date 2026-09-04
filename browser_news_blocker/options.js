@@ -8,7 +8,7 @@ chrome.storage.sync.get({customDomains: ""}, ({customDomains}) => {
 document.querySelector("#save").addEventListener("click", () => {
   chrome.runtime.sendMessage({type: "save-custom-domains", domains: domains.value}, (result) => {
     status.textContent = result?.ok
-      ? "Liste enregistrée."
-      : `Impossible d’enregistrer : ${result?.error || "erreur inconnue"}`;
+      ? "List saved."
+      : `Unable to save: ${result?.error || "unknown error"}`;
   });
 });

@@ -6,18 +6,20 @@ import webbrowser
 from ctypes import wintypes
 from pathlib import Path
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QSystemTrayIcon
 
 from gui import create_tray_icon
 from guard import MonitoringService
+from runtime_profile import current_profile
 from usage_guard import config, debug_log
 from windows_notifications import show_notification
 
 
 class TrayControlSource:
-    def __init__(self):
+    def __init__(self, decision_mirror=None):
         self.tray_icon = None
-        self.service = MonitoringService()
+        self.service = MonitoringService(decision_mirror=decision_mirror)
         self._pwa_launching_until = 0.0
 
     def start(self):
@@ -39,6 +41,17 @@ class TrayControlSource:
     def stop(self):
         self.close_panel()
         self.service.stop()
+
+    def reregister_tray(self):
+        """Restore the notification icon after Windows Explorer restarted."""
+        icon = self.tray_icon
+        if icon is None:
+            return
+        callback = getattr(icon, "_reregister_with_shell", None)
+        if callback:
+            QTimer.singleShot(0, callback)
+        else:
+            icon.show()
 
     def close_panel(self):
         """Close the dedicated local PWA window without touching browser tabs."""
@@ -63,8 +76,24 @@ class TrayControlSource:
         browser = self._app_browser()
         if browser:
             debug_log(f"launching PWA with browser={browser}")
+            # Chromium reuses an already running browser process and its
+            # extensions unless the app window has its own user-data folder.
+            # Keep the local control surface isolated from Dark Reader and
+            # every other extension while preserving its own cookies/settings.
+            browser_profile = (
+                current_profile().local_data_directory() / "PWA Browser"
+            )
+            browser_profile.mkdir(parents=True, exist_ok=True)
             subprocess.Popen(
-                [str(browser), f"--app={url}"],
+                [
+                    str(browser),
+                    f"--user-data-dir={browser_profile}",
+                    "--disable-extensions",
+                    "--disable-background-mode",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    f"--app={url}",
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -102,6 +131,11 @@ class TrayControlSource:
         """Find only the dedicated browser-app window, never a normal tab."""
         user32 = ctypes.windll.user32
         found = []
+        profile = current_profile()
+        expected_title = (
+            "Usage Guard" if profile.production
+            else f"Usage Guard · {profile.name.upper()}"
+        )
         callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
         @callback_type
@@ -116,7 +150,10 @@ class TrayControlSource:
             # Edge/Chrome app mode uses the document title verbatim. A normal
             # browser window adds its browser/profile suffix, so it is left
             # untouched even if the local dashboard is open in a regular tab.
-            if title.value in {"Usage Guard", "127.0.0.1_/"}:
+            accepted_titles = {expected_title}
+            if profile.production:
+                accepted_titles.add("127.0.0.1_/")
+            if title.value in accepted_titles:
                 found.append(hwnd)
                 return False
             return True

@@ -1,18 +1,18 @@
-# Usage Guard — Blocage actualités
+# Usage Guard — News limiter experiment
 
-Extension de test indépendante du Browser Bridge. Elle laisse les sites
-d’actualité s’ouvrir et affiche un bandeau pleine largeur en haut de la page,
-avec un décompte et une barre de progression de 15 minutes. Une notification
-système est aussi affichée lorsque Brave les autorise. Elle ne contacte pas
-Usage Guard.
+This experimental extension is independent from the Browser Bridge. It lets a
+news website open and displays a full-width banner with a two-minute countdown
+and progress bar, followed by an optional one-time one-minute extension. It
+also sends a system notification when the browser allows one. It does not
+communicate with Usage Guard.
 
-## Installation dans Brave ou Chrome
+## Install in Brave or Chrome
 
-1. Ouvrir `brave://extensions` (ou `chrome://extensions`).
-2. Activer **Mode développeur**.
-3. Cliquer sur **Charger l’extension non empaquetée**.
-4. Sélectionner ce dossier : `browser_news_blocker`.
+1. Open `brave://extensions` (or `chrome://extensions`).
+2. Enable **Developer mode**.
+3. Select **Load unpacked**.
+4. Select the `browser_news_blocker` directory.
 
-Les sites surveillés par défaut comprennent Le Monde, Le Figaro, Libération,
-Franceinfo, BFMTV, 20 Minutes, Mediapart, BBC, et CNN. Les sites additionnels
-se règlent par clic droit sur l’extension, puis **Options**.
+The default list includes Le Monde, Le Figaro, Libération, Franceinfo, BFMTV,
+20 Minutes, Mediapart, BBC, and CNN. Add more websites from the extension's
+context menu under **Options**.

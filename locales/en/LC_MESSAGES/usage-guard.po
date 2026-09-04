@@ -136,8 +136,8 @@ msgstr "{label} — limit reached"
 msgid "Fermer {label}"
 msgstr "Close {label}"
 
-msgid "Obtenir une rallonge exceptionnelle de {seconds} sec"
-msgstr "Get an exceptional extension of {seconds} sec"
+msgid "Obtenir une rallonge exceptionnelle de {duration}"
+msgstr "Get an exceptional extension of {duration}"
 
 msgid "Rallonge déjà utilisée sur les dernières 24 h"
 msgstr "Extension already used within the last 24 hours"
@@ -193,8 +193,722 @@ msgstr "Remove restriction"
 msgid "Blocage actif jusqu’au {time}."
 msgstr "Restriction active until {time}."
 
+msgid "Enregistrer et fermer — 5 min"
+msgstr "Save and close — 5 min"
+
+msgid "Arrêter l’ordinateur"
+msgstr "Shut down computer"
+
+msgid "Redémarrer l’ordinateur"
+msgstr "Restart computer"
+
+msgid "Joker de fermeture déjà utilisé"
+msgstr "Closing grace period already used"
+
+msgid "Blocage actif jusqu’au {time}. Enregistrez vos documents avec le joker, ou arrêtez/redémarrez Windows normalement."
+msgstr "Restriction active until {time}. Save your documents using the grace period, or shut down/restart Windows normally."
+
+msgid "Joker de fermeture — Usage Guard"
+msgstr "Closing grace period — Usage Guard"
+
+msgid "Arrêter"
+msgstr "Shut down"
+
+msgid "Redémarrer"
+msgstr "Restart"
+
+msgid "Enregistrez et fermez vos applications — reblocage dans {minutes:02d}:{seconds:02d}"
+msgstr "Save and close your applications — restriction resumes in {minutes:02d}:{seconds:02d}"
+
 msgid "{label} est bloquée pendant la période planifiée."
 msgstr "{label} is blocked during the scheduled period."
 
 msgid "Utilisation interdite pendant la période planifiée."
 msgstr "Usage is blocked during the scheduled period."
+
+msgid "Garder l’icône visible dans la barre"
+msgstr "Keep the icon visible in the taskbar"
+
+msgid " — rallonge utilisée"
+msgstr " — extra time used"
+
+msgid "Actif : {name}"
+msgstr "Active: {name}"
+
+msgid "Activer cette limite"
+msgstr "Enable this limit"
+
+msgid "Activée"
+msgstr "Enabled"
+
+msgid "Ajouter une limite"
+msgstr "Add a limit"
+
+msgid "Ajouter à une catégorie…"
+msgstr "Add to a category…"
+
+msgid "Application :"
+msgstr "Application:"
+
+msgid "Applications exclues"
+msgstr "Excluded applications"
+
+msgid "Applications limitées"
+msgstr "Limited applications"
+
+msgid "Applications non comptabilisées"
+msgstr "Uncounted applications"
+
+msgid "Autres sites"
+msgstr "Other websites"
+
+msgid "Brave (sans site identifié)"
+msgstr "Brave (no website identified)"
+
+msgid "Catégorie"
+msgstr "Category"
+
+msgid "Catégorie cible pour « {category} » :"
+msgstr "Target category for “{category}”:"
+
+msgid "Catégorie existante ou nouveau nom :"
+msgstr "Existing category or new name:"
+
+msgid "Catégorie parente"
+msgstr "Parent category"
+
+msgid "Catégorie pour « {host} » :"
+msgstr "Category for “{host}”:"
+
+msgid "Cette limite ne peut être modifiée que depuis l’interface distante."
+msgstr "This limit can only be edited from the remote interface."
+
+msgid "Clic droit : classer ce site ou le rendre spécifique"
+msgstr "Right-click to classify this website or make it specific"
+
+msgid "Durée autorisée (secondes) :"
+msgstr "Allowed duration (seconds):"
+
+msgid "Déplacer dans une catégorie…"
+msgstr "Move to a category…"
+
+msgid "Déplacer « {category} » dans une catégorie…"
+msgstr "Move “{category}” into a category…"
+
+msgid "Désactiver cette limite"
+msgstr "Disable this limit"
+
+msgid "Désactivée"
+msgstr "Disabled"
+
+msgid "En attente d’une application active"
+msgstr "Waiting for an active application"
+
+msgid "En pause — ordinateur inactif"
+msgstr "Paused — computer inactive"
+
+msgid "Fusionner dans une autre application…"
+msgstr "Merge into another application…"
+
+msgid "Fusionner les applications"
+msgstr "Merge applications"
+
+msgid "Fusionner l’application"
+msgstr "Merge application"
+
+msgid "Fusionner toutes les durées dans :"
+msgstr "Merge all durations into:"
+
+msgid "Fusionner « {source} » dans « {destination} » ?\n\nToutes les durées de la première seront déplacées vers la seconde."
+msgstr "Merge “{source}” into “{destination}”?\n\nAll durations from the first application will be moved to the second."
+
+msgid "Inactifs ({count})"
+msgstr "Inactive ({count})"
+
+msgid "Limite activée"
+msgstr "Limit enabled"
+
+msgid "Limite administrée à distance"
+msgstr "Remotely managed limit"
+
+msgid "Limite désactivée"
+msgstr "Limit disabled"
+
+msgid "Limite — {label}"
+msgstr "Limit — {label}"
+
+msgid "Média en arrière-plan"
+msgstr "Background media"
+
+msgid "Ne pas comptabiliser"
+msgstr "Do not count"
+
+msgid "Ne pas comptabiliser dans lecture passive"
+msgstr "Do not count as background playback"
+
+msgid "Notification avant la fin (secondes) :"
+msgstr "Warning before the end (seconds):"
+
+msgid "Nouveau nom :"
+msgstr "New name:"
+
+msgid "Rallonge exceptionnelle (secondes) :"
+msgstr "Exceptional extra time (seconds):"
+
+msgid "Remonter à la racine"
+msgstr "Move to the root"
+
+msgid "Rendre spécifique"
+msgstr "Make specific"
+
+msgid "Renommer la catégorie"
+msgstr "Rename category"
+
+msgid "Renommer la catégorie…"
+msgstr "Rename category…"
+
+msgid "Renommer l’activité"
+msgstr "Rename activity"
+
+msgid "Renommer l’activité…"
+msgstr "Rename activity…"
+
+msgid "Retirer de la catégorie"
+msgstr "Remove from category"
+
+msgid "Réactiver"
+msgstr "Re-enable"
+
+msgid "Sortir de non classé"
+msgstr "Move out of uncategorized"
+
+msgid "Supprimer définitivement l’historique de « {host} » ?"
+msgstr "Permanently delete the history for “{host}”?"
+
+msgid "Supprimer définitivement l’historique de « {label} » ?"
+msgstr "Permanently delete the history for “{label}”?"
+
+msgid "Supprimer la limite"
+msgstr "Delete limit"
+
+msgid "Supprimer la limite de « {label} » ?"
+msgstr "Delete the limit for “{label}”?"
+
+msgid "Supprimer le site"
+msgstr "Delete website"
+
+msgid "Supprimer l’activité"
+msgstr "Delete activity"
+
+msgid "Supprimer…"
+msgstr "Delete…"
+
+msgid "Sélectionnez une application à réactiver :"
+msgstr "Select an application to re-enable:"
+
+msgid "Toutes les applications connues ont déjà une limite."
+msgstr "All known applications already have a limit."
+
+msgid "{period} | {selection} : {total} | Moyenne/jour : {average} | Jours actifs : {active_days}/{day_count} | Maximum : {best_day} ({best_duration}) | Ordinateur : {computer_duration}"
+msgstr "{period} | {selection}: {total} | Daily average: {average} | Active days: {active_days}/{day_count} | Maximum: {best_day} ({best_duration}) | Computer: {computer_duration}"
+
+msgid "État :"
+msgstr "Status:"
+
+msgid "Arrêt de l’ordinateur — Usage Guard"
+msgstr "Computer shutdown — Usage Guard"
+
+msgid "Catégorie · {category}"
+msgstr "Category · {category}"
+
+msgid "Connexion à l’interface — Usage Guard"
+msgstr "Interface sign-in — Usage Guard"
+
+msgid "Droits modifiés — Usage Guard"
+msgstr "Permissions changed — Usage Guard"
+
+msgid "Durée atteinte — Usage Guard"
+msgstr "Duration reached — Usage Guard"
+
+msgid "Horaire atteint — Usage Guard"
+msgstr "Scheduled time reached — Usage Guard"
+
+msgid "Il reste {duration} avant le blocage."
+msgstr "{duration} remains before blocking."
+
+msgid "Il reste {duration} avant l’heure de fin autorisée."
+msgstr "{duration} remains before the allowed end time."
+
+msgid "La durée autorisée est atteinte. L’utilisation est maintenant bloquée."
+msgstr "The allowed duration has been reached. Usage is now blocked."
+
+msgid "La durée normale est dépassée. Le joker de {duration} est actif."
+msgstr "The normal allowance has been exceeded. The {duration} extra time is active."
+
+msgid "Le client Usage Guard ne communiquait plus avec le serveur."
+msgstr "The Usage Guard client stopped communicating with the server."
+
+msgid "Le client Usage Guard vient de se connecter au serveur."
+msgstr "The Usage Guard client has connected to the server."
+
+msgid "Les droits d’un utilisateur ont été modifiés."
+msgstr "A user’s permissions were changed."
+
+msgid "Limitation activée par {actor} — Usage Guard"
+msgstr "Computer limitation enabled by {actor} — Usage Guard"
+
+msgid "Limitation désactivée par {actor} — Usage Guard"
+msgstr "Computer limitation disabled by {actor} — Usage Guard"
+
+msgid "Limitation levée par {actor} — Usage Guard"
+msgstr "Computer limitation removed by {actor} — Usage Guard"
+
+msgid "Limitation planifiée par {actor} — Usage Guard"
+msgstr "Computer limitation scheduled by {actor} — Usage Guard"
+
+msgid "Limite activée par {actor} — Usage Guard"
+msgstr "Limit enabled by {actor} — Usage Guard"
+
+msgid "Limite créée par {actor} — Usage Guard"
+msgstr "Limit created by {actor} — Usage Guard"
+
+msgid "Limite désactivée par {actor} — Usage Guard"
+msgstr "Limit disabled by {actor} — Usage Guard"
+
+msgid "Limite modifiée par {actor} — Usage Guard"
+msgstr "Limit changed by {actor} — Usage Guard"
+
+msgid "Limite supprimée par {actor} — Usage Guard"
+msgstr "Limit deleted by {actor} — Usage Guard"
+
+msgid "L’arrêt de l’ordinateur vient d’être demandé."
+msgstr "Computer shutdown was just requested."
+
+msgid "L’ordinateur vient de sortir de veille."
+msgstr "The computer just resumed from sleep."
+
+msgid "L’ordinateur vient d’être mis en veille."
+msgstr "The computer was just put to sleep."
+
+msgid "L’utilisation est interdite après {time}."
+msgstr "Usage is blocked after {time}."
+
+msgid "L’état de la protection a changé."
+msgstr "The protection state changed."
+
+msgid "Ordinateur allumé — Usage Guard"
+msgstr "Computer online — Usage Guard"
+
+msgid "Ordinateur mis en veille — Usage Guard"
+msgstr "Computer asleep — Usage Guard"
+
+msgid "Ordinateur sorti de veille — Usage Guard"
+msgstr "Computer resumed — Usage Guard"
+
+msgid "Ordinateur éteint ou inaccessible — Usage Guard"
+msgstr "Computer offline or unreachable — Usage Guard"
+
+msgid "Rappel programmé au démarrage."
+msgstr "Reminder scheduled at startup."
+
+msgid "Rappel — Usage Guard"
+msgstr "Reminder — Usage Guard"
+
+msgid "Seuil d’usage atteint"
+msgstr "Usage threshold reached"
+
+msgid "Une connexion à l’interface de gestion a été détectée."
+msgstr "A sign-in to the management interface was detected."
+
+msgid "Usage de l’ordinateur limité par {actor} — Usage Guard"
+msgstr "Computer usage limited by {actor} — Usage Guard"
+
+msgid "Usage limité : {duration}."
+msgstr "Limited usage: {duration}."
+
+msgid "Utilisateur inconnu"
+msgstr "Unknown user"
+
+msgid "Utilisateur local"
+msgstr "Local user"
+
+msgid "Utilisateur local ({username})"
+msgstr "Local user ({username})"
+
+msgid "{actor} a activé la limitation de l’usage de l’ordinateur."
+msgstr "{actor} enabled the computer usage limitation."
+
+msgid "{actor} a activé la limite « {label} »."
+msgstr "{actor} enabled the “{label}” limit."
+
+msgid "{actor} a créé la limite « {label} »."
+msgstr "{actor} created the “{label}” limit."
+
+msgid "{actor} a désactivé la limitation de l’usage de l’ordinateur."
+msgstr "{actor} disabled the computer usage limitation."
+
+msgid "{actor} a désactivé la limite « {label} »."
+msgstr "{actor} disabled the “{label}” limit."
+
+msgid "{actor} a levé la limitation de l’usage de l’ordinateur."
+msgstr "{actor} removed the computer usage limitation."
+
+msgid "{actor} a limité l’usage de l’ordinateur jusqu’au {end}."
+msgstr "{actor} limited computer usage until {end}."
+
+msgid "{actor} a modifié la limite « {label} »."
+msgstr "{actor} changed the “{label}” limit."
+
+msgid "{actor} a planifié la limitation du {start} jusqu’au {end}."
+msgstr "{actor} scheduled the limitation from {start} until {end}."
+
+msgid "{actor} a supprimé la limite « {label} »."
+msgstr "{actor} deleted the “{label}” limit."
+
+msgid "{actor} connecté à la PWA — Usage Guard"
+msgstr "{actor} signed in to the PWA — Usage Guard"
+
+msgid "{actor} vient de se connecter à la PWA depuis {ip}."
+msgstr "{actor} just signed in to the PWA from {ip}."
+
+msgid "{actor} vient de se connecter à la PWA."
+msgstr "{actor} just signed in to the PWA."
+
+msgid "{label} a atteint {duration} d’utilisation."
+msgstr "{label} reached {duration} of use."
+
+msgid "{label} a atteint {threshold} % de sa limite."
+msgstr "{label} reached {threshold}% of its limit."
+
+msgid "{label} est utilisé après l’heure définie ({time})."
+msgstr "{label} is being used after the configured time ({time})."
+
+msgid "{label} — bientôt interdit"
+msgstr "{label} — restriction starts soon"
+
+msgid "{label} — bientôt terminé"
+msgstr "{label} — ending soon"
+
+msgid "{label} — heure autorisée dépassée"
+msgstr "{label} — allowed time exceeded"
+
+msgid "Il reste {duration} avant l’avertissement de fin de plage."
+msgstr "{duration} remains before the end-of-time-slot warning."
+
+msgid "Il reste {duration} avant l’avertissement."
+msgstr "{duration} remains before the warning."
+
+msgid "La durée définie est atteinte. L’utilisation reste autorisée en mode avertissement."
+msgstr "The configured duration has been reached. Usage remains allowed in warning mode."
+
+msgid "L’heure définie ({time}) est dépassée ; l’utilisation reste autorisée en mode avertissement."
+msgstr "The configured time ({time}) has passed; usage remains allowed in warning mode."
+
+msgid "Période surveillée : l’utilisation reste autorisée."
+msgstr "Monitored period: usage remains allowed."
+
+msgid "Période surveillée : un avertissement sera affiché."
+msgstr "Monitored period: a warning will be shown."
+
+msgid "{label} — heure surveillée bientôt atteinte"
+msgstr "{label} — monitored time approaching"
+
+msgid "{label} — seuil bientôt atteint"
+msgstr "{label} — threshold approaching"
+
+msgid "{label} — joker utilisé"
+msgstr "{label} — extra time used"
+
+msgid "État de protection — Usage Guard"
+msgstr "Protection state — Usage Guard"
+
+msgid "\nConfiguration sécurisée de Usage Guard"
+msgstr "\nSecure Usage Guard setup"
+
+msgid "\nEnrôlement autorisé. Installation locale en cours…"
+msgstr "\nEnrollment authorised. Local installation is starting…"
+
+msgid "\nInstallation annulée : {error}"
+msgstr "\nInstallation cancelled: {error}"
+
+msgid "Administrateur Usage Guard"
+msgstr "Usage Guard administrator"
+
+msgid "Adresse du serveur"
+msgstr "Server address"
+
+msgid "Annuler"
+msgstr "Cancel"
+
+msgid "Associations de session"
+msgstr "Session assignments"
+
+msgid "Associez au moins un compte Windows existant."
+msgstr "Assign at least one existing Windows account."
+
+msgid "Au moins un compte associé est administrateur Windows. Il pourra altérer ou désinstaller la protection locale. Continuer ?"
+msgstr "At least one assigned account is a Windows administrator. It will be able to alter or uninstall local protection. Continue?"
+
+msgid "Aucun choix disponible."
+msgstr "No option is available."
+
+msgid "Aucun compte Windows local ou de domaine existant n’a été détecté."
+msgstr "No existing local or domain Windows account was detected."
+
+msgid "Aucun utilisateur à associer n’existe. Créez-le d’abord dans la PWA."
+msgstr "No user is available to assign. Create one in the PWA first."
+
+msgid "Aucun utilisateur à limiter n’existe. Créez-le d’abord dans la PWA."
+msgstr "No limited user exists. Create one in the PWA first."
+
+msgid "Ce compte n’est pas administrateur."
+msgstr "This account is not an administrator."
+
+msgid "Chaque identifiant Usage Guard doit être unique et distinct de l’administrateur."
+msgstr "Each Usage Guard username must be unique and different from the administrator."
+
+msgid "Choisissez les sessions Windows suivies. Le mot de passe administrateur est propre à Usage Guard et n’est jamais celui de Windows."
+msgstr "Choose the Windows sessions to monitor. The administrator password belongs to Usage Guard and is never the Windows password."
+
+msgid "Choix"
+msgstr "Choice"
+
+msgid "Choix invalide."
+msgstr "Invalid choice."
+
+msgid "Code d’enrôlement serveur invalide."
+msgstr "Invalid server enrollment code."
+
+msgid "Compte Windows administrateur"
+msgstr "Windows administrator account"
+
+msgid "Compte Windows existant"
+msgstr "Existing Windows account"
+
+msgid "Compte Windows existant invalide."
+msgstr "Invalid existing Windows account."
+
+msgid "Configurer cet ordinateur"
+msgstr "Set up this computer"
+
+msgid "Confirmer le mot de passe"
+msgstr "Confirm password"
+
+msgid "Connectez-vous avec un compte administrateur Usage Guard. Le mot de passe ne sera jamais enregistré."
+msgstr "Sign in with a Usage Guard administrator account. The password will never be stored."
+
+msgid "Connecté à un serveur"
+msgstr "Connected to a server"
+
+msgid "Connexion réussie. Vérifiez l’affectation avant installation."
+msgstr "Connection successful. Check the assignment before installing."
+
+msgid "Connexion sécurisée au serveur…"
+msgstr "Securely connecting to the server…"
+
+msgid "Création de l’enrôlement à usage unique…"
+msgstr "Creating the one-time enrollment…"
+
+msgid "E-mail administrateur"
+msgstr "Administrator email"
+
+msgid "En attente de connexion."
+msgstr "Waiting for a connection."
+
+msgid "Erreur non détaillée par PowerShell."
+msgstr "PowerShell did not provide error details."
+
+msgid "Erreur serveur HTTP {code}."
+msgstr "HTTP server error {code}."
+
+msgid "Identifiant Usage Guard"
+msgstr "Usage Guard username"
+
+msgid "Identifiant administrateur"
+msgstr "Administrator username"
+
+msgid "Identifiant administrateur invalide."
+msgstr "Invalid administrator username."
+
+msgid "Installation de Usage Guard"
+msgstr "Usage Guard installation"
+
+msgid "Installer Usage Guard"
+msgstr "Install Usage Guard"
+
+msgid "Installer en mode local"
+msgstr "Install in local mode"
+
+msgid "La configuration n’a pas abouti."
+msgstr "Setup did not complete."
+
+msgid "La protection DPAPI exige Windows."
+msgstr "DPAPI protection requires Windows."
+
+msgid "Le mot de passe doit contenir au moins 10 caractères et les deux saisies doivent correspondre."
+msgstr "The password must contain at least 10 characters and both entries must match."
+
+msgid "Le mot de passe doit d’abord être changé dans la PWA distante."
+msgstr "The password must first be changed in the remote PWA."
+
+msgid "Le mot de passe est requis."
+msgstr "A password is required."
+
+msgid "Le nom visible doit contenir entre 1 et 80 caractères."
+msgstr "The display name must contain between 1 and 80 characters."
+
+msgid "Le paquet est incomplet. Extrayez entièrement l’archive avant de lancer l’installation."
+msgstr "The package is incomplete. Extract the entire archive before starting the installation."
+
+msgid "Le serveur n’a pas fourni de code d’enrôlement valide."
+msgstr "The server did not provide a valid enrollment code."
+
+msgid "Local — un seul ordinateur"
+msgstr "Local — one computer"
+
+msgid "L’adresse du serveur doit être une URL HTTPS sans paramètres."
+msgstr "The server address must be an HTTPS URL without query parameters."
+
+msgid "L’appareil déjà installé est absent ou révoqué sur le serveur. Aucune nouvelle identité ne sera créée automatiquement."
+msgstr "The installed device is missing or revoked on the server. No new identity will be created automatically."
+
+msgid "L’autorisation administrateur est nécessaire pour installer Usage Guard."
+msgstr "Administrator permission is required to install Usage Guard."
+
+msgid "L’identité de l’appareil existant a changé."
+msgstr "The existing device identity has changed."
+
+msgid "Mot de passe"
+msgstr "Password"
+
+msgid "Mot de passe administrateur : "
+msgstr "Administrator password: "
+
+msgid "Nom de l’ordinateur"
+msgstr "Computer name"
+
+msgid "Nom d’ordinateur invalide."
+msgstr "Invalid computer name."
+
+msgid "Nom visible de l’ordinateur"
+msgstr "Computer display name"
+
+msgid "Non suivi"
+msgstr "Not monitored"
+
+msgid "Nouvel ordinateur"
+msgstr "New computer"
+
+msgid "Profil d’installation"
+msgstr "Installation profile"
+
+msgid "Renseignez le serveur, l’identifiant et le mot de passe."
+msgstr "Enter the server, username, and password."
+
+msgid "Réinstaller {name}"
+msgstr "Reinstall {name}"
+
+msgid "Rôle"
+msgstr "Role"
+
+msgid "Saisie interrompue."
+msgstr "Input interrupted."
+
+msgid "Se connecter"
+msgstr "Sign in"
+
+msgid "Serveur inaccessible : {reason}"
+msgstr "Server unavailable: {reason}"
+
+msgid "Sessions Windows"
+msgstr "Windows sessions"
+
+msgid "Type d’installation"
+msgstr "Installation type"
+
+msgid "Type d’installation :"
+msgstr "Installation type:"
+
+msgid "Un compte Windows est associé plusieurs fois."
+msgstr "A Windows account is assigned more than once."
+
+msgid "Un utilisateur Usage Guard est associé plusieurs fois."
+msgstr "A Usage Guard user is assigned more than once."
+
+msgid "Utilisateur Usage Guard"
+msgstr "Usage Guard user"
+
+msgid "Utilisateur Usage Guard manquant."
+msgstr "Usage Guard user is missing."
+
+msgid "Utilisateur dont les limites s’appliqueront sur ce PC :"
+msgstr "User whose limits will apply on this computer:"
+
+msgid "Utilisateur à limiter"
+msgstr "Limited user"
+
+msgid "Vérifiez l’utilisateur, le type d’installation et le nom."
+msgstr "Check the user, installation type, and name."
+
+msgid "administrateur Windows"
+msgstr "Windows administrator"
+
+msgid "session active"
+msgstr "active session"
+
+msgid "— Non associé —"
+msgstr "— Not assigned —"
+
+msgid "Usage Guard est installé.\n\nPour garder son icône visible en bas, à côté de vos autres icônes, faites-la glisser depuis le menu des icônes masquées vers la barre.\n\nOuvrir maintenant les paramètres de la barre des tâches ?"
+msgstr "Usage Guard is installed.\n\nTo keep its icon visible at the bottom next to your other icons, drag it from the hidden-icons menu to the taskbar.\n\nOpen taskbar settings now?"
+
+msgid "L’extension navigateur a été copiée dans :\n{path}\n\nDans Brave ou Chrome, ouvrez la page Extensions, activez le mode développeur, choisissez « Charger l’extension non empaquetée », puis sélectionnez ce dossier.\n\nCette activation est propre à chaque profil de navigateur."
+msgstr "The browser extension was copied to:\n{path}\n\nIn Brave or Chrome, open the Extensions page, enable developer mode, choose ‘Load unpacked’, then select this folder.\n\nThis setting applies separately to each browser profile."
+
+msgid "L’installation n’a pas abouti. Aucun ancien client fonctionnel ne doit avoir été supprimé.\n\nDétail : {detail}\n\nJournal : {log}"
+msgstr "Installation did not complete. No working previous client should have been removed.\n\nDetails: {detail}\n\nLog: {log}"
+
+msgid "L’ordinateur « {name} » est rattaché à {users}.\n\nL’installation du service va maintenant se poursuivre."
+msgstr "Computer ‘{name}’ is assigned to {users}.\n\nService installation will now continue."
+
+msgid "Accès administrateur"
+msgstr "Administrator access"
+
+msgid "Administrateur"
+msgstr "Administrator"
+
+msgid "Authentification administrateur indisponible."
+msgstr "Administrator authentication is unavailable."
+
+msgid "Connexion administrateur refusée."
+msgstr "Administrator sign-in denied."
+
+msgid "Déverrouillage administrateur indisponible."
+msgstr "Administrator unlock is unavailable."
+
+msgid "Déverrouillage administrateur — Usage Guard"
+msgstr "Administrator unlock — Usage Guard"
+
+msgid "Déverrouiller"
+msgstr "Unlock"
+
+msgid "Identifiant ou mot de passe incorrect."
+msgstr "Incorrect username or password."
+
+msgid "Raccourci : Ctrl+Alt+L"
+msgstr "Shortcut: Ctrl+Alt+L"
+
+msgid "Renseignez l’identifiant et le mot de passe."
+msgstr "Enter the username and password."
+
+msgid "Un compte administrateur actif est requis."
+msgstr "An active administrator account is required."
+
+msgid "{actor} s’est authentifié pendant une limitation et a déverrouillé l’ordinateur."
+msgstr "{actor} signed in during a limitation and unlocked the computer."
+
+msgid "La limitation active a changé ; aucune règle n’a été modifiée."
+msgstr "The active limitation changed; no rule was modified."
+
+msgid "La limitation affichée n’est plus active ; aucune règle n’a été modifiée."
+msgstr "The displayed limitation is no longer active; no rule was modified."

@@ -4,3 +4,69 @@ msgstr ""
 "Language: fr\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 
+msgid "Accès administrateur"
+msgstr "Accès administrateur"
+
+msgid "Administrateur"
+msgstr "Administrateur"
+
+msgid "Authentification administrateur indisponible."
+msgstr "Authentification administrateur indisponible."
+
+msgid "Connexion administrateur refusée."
+msgstr "Connexion administrateur refusée."
+
+msgid "Déverrouillage administrateur indisponible."
+msgstr "Déverrouillage administrateur indisponible."
+
+msgid "Déverrouillage administrateur — Usage Guard"
+msgstr "Déverrouillage administrateur — Usage Guard"
+
+msgid "Déverrouiller"
+msgstr "Déverrouiller"
+
+msgid "Identifiant ou mot de passe incorrect."
+msgstr "Identifiant ou mot de passe incorrect."
+
+msgid "Raccourci : Ctrl+Alt+L"
+msgstr "Raccourci : Ctrl+Alt+L"
+
+msgid "Renseignez l’identifiant et le mot de passe."
+msgstr "Renseignez l’identifiant et le mot de passe."
+
+msgid "Un compte administrateur actif est requis."
+msgstr "Un compte administrateur actif est requis."
+
+msgid "{actor} s’est authentifié pendant une limitation et a déverrouillé l’ordinateur."
+msgstr "{actor} s’est authentifié pendant une limitation et a déverrouillé l’ordinateur."
+
+msgid "La limitation active a changé ; aucune règle n’a été modifiée."
+msgstr "La limitation active a changé ; aucune règle n’a été modifiée."
+
+msgid "La limitation affichée n’est plus active ; aucune règle n’a été modifiée."
+msgstr "La limitation affichée n’est plus active ; aucune règle n’a été modifiée."
+
+msgid "Il reste {duration} avant l’avertissement de fin de plage."
+msgstr "Il reste {duration} avant l’avertissement de fin de plage."
+
+msgid "Il reste {duration} avant l’avertissement."
+msgstr "Il reste {duration} avant l’avertissement."
+
+msgid "La durée définie est atteinte. L’utilisation reste autorisée en mode avertissement."
+msgstr "La durée définie est atteinte. L’utilisation reste autorisée en mode avertissement."
+
+msgid "L’heure définie ({time}) est dépassée ; l’utilisation reste autorisée en mode avertissement."
+msgstr "L’heure définie ({time}) est dépassée ; l’utilisation reste autorisée en mode avertissement."
+
+msgid "Période surveillée : l’utilisation reste autorisée."
+msgstr "Période surveillée : l’utilisation reste autorisée."
+
+msgid "Période surveillée : un avertissement sera affiché."
+msgstr "Période surveillée : un avertissement sera affiché."
+
+msgid "{label} — heure surveillée bientôt atteinte"
+msgstr "{label} — heure surveillée bientôt atteinte"
+
+msgid "{label} — seuil bientôt atteint"
+msgstr "{label} — seuil bientôt atteint"
+

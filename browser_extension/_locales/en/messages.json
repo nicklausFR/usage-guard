@@ -13,5 +13,56 @@
   },
   "getExtension": {
     "message": "Get an exceptional extension of $1"
+  },
+  "optionsTitle": {
+    "message": "Usage Guard · Banner"
+  },
+  "optionsHeading": {
+    "message": "Usage Guard banner"
+  },
+  "optionsDescription": {
+    "message": "These settings control the reminder shown before a limit is reached. Once the limit is reached, the banner and exceptional extension remain visible."
+  },
+  "displayLabel": {
+    "message": "Display"
+  },
+  "displayWarning": {
+    "message": "Only when approaching the limit"
+  },
+  "displayPeriodic": {
+    "message": "Periodic reminder"
+  },
+  "displayAlways": {
+    "message": "Always visible"
+  },
+  "displayHidden": {
+    "message": "Hidden before blocking"
+  },
+  "positionLabel": {
+    "message": "Position"
+  },
+  "positionTop": {
+    "message": "Top"
+  },
+  "positionBottom": {
+    "message": "Bottom"
+  },
+  "opacityLabel": {
+    "message": "Background opacity"
+  },
+  "opacityValue": {
+    "message": "$1% opaque"
+  },
+  "warningSecondsLabel": {
+    "message": "Advance warning (seconds)"
+  },
+  "periodicEveryLabel": {
+    "message": "Reminder interval (seconds)"
+  },
+  "periodicDurationLabel": {
+    "message": "Reminder duration (seconds)"
+  },
+  "settingsSaved": {
+    "message": "Settings saved."
   }
 }

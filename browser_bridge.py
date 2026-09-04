@@ -5,7 +5,10 @@ import re
 import threading
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from runtime_profile import current_profile
 
 
 MAX_BODY = 1024 * 1024
@@ -22,11 +25,13 @@ class BrowserTab:
 
 
 class BrowserBridge:
-    def __init__(self, host="127.0.0.1", port=8765):
+    def __init__(self, host="127.0.0.1", port=None):
         if host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("The browser bridge must listen on loopback only")
         self.host = host
-        self.port = port
+        self.port = (
+            current_profile().browser_bridge_port if port is None else int(port)
+        )
         self._tab = BrowserTab()
         self._lock = threading.Lock()
         self._server = None
@@ -36,6 +41,8 @@ class BrowserBridge:
         self._limit_provider = None
         self._extension_requests = []
         self._open_tabs = None
+        self._extension_seen_monotonic = 0.0
+        self._extension_seen_at = ""
 
     def start(self):
         if self._server is not None:
@@ -74,6 +81,7 @@ class BrowserBridge:
                             })
                         with bridge._lock:
                             bridge._open_tabs = normalized
+                        bridge._mark_extension_seen()
                         self._send_json({"accepted": True})
                         return
                     if self.path == "/extension":
@@ -82,6 +90,7 @@ class BrowserBridge:
                             raise ValueError("unsupported limit target")
                         with bridge._lock:
                             bridge._extension_requests.append(target_key)
+                        bridge._mark_extension_seen()
                         self._send_json({"accepted": True})
                         return
                     generic = bool(payload.get("generic"))
@@ -93,6 +102,7 @@ class BrowserBridge:
                                 generic=True,
                                 received_at=time.monotonic(),
                             )
+                        bridge._mark_extension_seen()
                         self._send_json({"limit": None})
                         return
                     url = str(payload.get("url", ""))
@@ -116,6 +126,7 @@ class BrowserBridge:
                         state = provider(url) if provider is not None else cached_state
                     except Exception:
                         state = cached_state
+                    bridge._mark_extension_seen()
                 except (ValueError, TypeError, json.JSONDecodeError):
                     self.send_error(400)
                     return
@@ -168,6 +179,21 @@ class BrowserBridge:
         """Return the last complete browser inventory, or None before first sync."""
         with self._lock:
             return None if self._open_tabs is None else [dict(tab) for tab in self._open_tabs]
+
+    def extension_status(self, max_age_seconds=75):
+        """Return a heartbeat status suitable for protected remote reporting."""
+        with self._lock:
+            seen = self._extension_seen_monotonic
+            seen_at = self._extension_seen_at
+        connected = bool(seen) and time.monotonic() - seen <= max_age_seconds
+        return {"connected": connected, "last_seen_at": seen_at}
+
+    def _mark_extension_seen(self):
+        with self._lock:
+            self._extension_seen_monotonic = time.monotonic()
+            self._extension_seen_at = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
 
 
 def _url_host(url):

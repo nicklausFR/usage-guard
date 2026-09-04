@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extensionName__",
-  "version": "1.1.8",
+  "version": "1.2.0",
   "description": "__MSG_extensionDescription__",
-  "default_locale": "fr",
-  "permissions": ["tabs", "alarms"],
+  "default_locale": "en",
+  "permissions": ["tabs", "alarms", "storage"],
   "host_permissions": ["http://127.0.0.1:8765/*"],
   "background": {"service_worker": "background.js"},
+  "options_ui": {"page": "options.html", "open_in_tab": true},
   "content_scripts": [{
     "matches": ["http://*/*", "https://*/*"],
     "js": ["content.js"],

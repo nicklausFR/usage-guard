@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-build.txt
+
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: |
+          node --check .\pwa\app.js
+          node --check .\browser_extension\background.js
+          node --check .\browser_extension\content.js
+          node --check .\browser_extension\options.js
+          node --check .\browser_news_blocker\background.js
+          node --check .\browser_news_blocker\reminder.js
+          node --check .\browser_news_blocker\options.js
+
+      - name: Audit translations
+        shell: pwsh
+        run: |
+          python .\tools\audit_i18n.py
+          node .\tools\check_pwa_i18n.js
+
+      - name: Run tests
+        run: python -B -m unittest discover -s tests

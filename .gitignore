@@ -3,9 +3,15 @@ __pycache__/
 
 build/
 dist/
+dist-v2/
+dist-*/
 *.spec
-build_exe.py
-tests/test_build_exe.py
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
 _limit_test.json
 usage_guard_backend/deploy-server.ps1
 usage_guard_backend/README.md
@@ -25,18 +31,28 @@ usage.bak.dat
 jokers.json
 activity.json
 activity.json.tmp
+activity.sqlite3*
 *.corrupt
 observations/
 
 .vscode/
 .agents/
 .codex/
+tmp/
 LOCAL_NOTES.md
+docs/next-session-handoff.md
+docs/client-release-ci.md
+docs/client-update-audit.md
+docs/development-release-flow.md
+docs/local-server-structure.md
+docs/multi-device-onboarding.md
+docs/reprise-usage-guard-2026-08-27.md
+docs/roadmap.md
 remote-api-token.txt
 backend.json
 relay_client.py
 
-# Secrets et données privées du backend
+# Backend secrets and private data
 usage_guard_backend/.env
 usage_guard_backend/data/
 usage_guard_backend/*.sqlite3*

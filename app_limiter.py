@@ -1,6 +1,8 @@
 """Foreground-only application limits for Windows."""
 
+import copy
 import ctypes
+import subprocess
 import sys
 import time
 from ctypes import wintypes
@@ -8,8 +10,16 @@ from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QApplication, QHBoxLayout, QLabel, QLineEdit, QPushButton, QVBoxLayout,
+    QWidget,
+)
 from i18n import _
+from command_policy import (
+    SOURCE_BACKEND, SOURCE_INTERNAL, SOURCE_LOCAL_ADMIN, is_backend_managed,
+)
+from limit_decision import evaluate_limit
+from runtime_profile import current_profile
 
 
 EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
@@ -38,6 +48,11 @@ if sys.platform == "win32":
     user32.SendMessageTimeoutW.restype = wintypes.LPARAM
     user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
     user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.SetWindowPos.argtypes = (
+        wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, wintypes.UINT,
+    )
+    user32.SetWindowPos.restype = wintypes.BOOL
     user32.GetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int)
     user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
     user32.SetWindowLongPtrW.argtypes = (
@@ -70,6 +85,10 @@ SMTO_ABORTIFHUNG = 0x0002
 SW_HIDE = 0
 SW_SHOW = 5
 SW_MINIMIZE = 6
+HWND_TOPMOST = wintypes.HWND(-1)
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_SHOWWINDOW = 0x0040
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_APPWINDOW = 0x00040000
@@ -125,13 +144,20 @@ class LimitOverlay(QWidget):
         self.controller.close_target()
         event.accept()
 
-    def configure(self, label, available, extension_seconds, period_block=False):
+    def configure(
+        self, label, available, extension_seconds, extension_unit="seconds",
+        period_block=False,
+    ):
         self.setWindowTitle(_("{label} — limite atteinte").format(label=label))
         self.close_button.setText(_("Fermer {label}").format(label=label))
         self.extension_button.setVisible(not period_block)
         self.extension_button.setEnabled(available)
         self.extension_button.setText(
-            _("Obtenir une rallonge exceptionnelle de {seconds} sec").format(seconds=extension_seconds)
+            _("Obtenir une rallonge exceptionnelle de {duration}").format(
+                duration=AppLimiter._format_configured_duration(
+                    extension_seconds, extension_unit,
+                )
+            )
             if available else _("Rallonge déjà utilisée sur les dernières 24 h")
         )
         self.message.setText(
@@ -156,6 +182,7 @@ class ComputerBlockOverlay(QWidget):
 
     def __init__(self, controller):
         super().__init__(None, Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.controller = controller
         self.setWindowTitle(_("Ordinateur indisponible — Usage Guard"))
         self.setStyleSheet("background:#231013; color:white;")
         layout = QVBoxLayout(self)
@@ -166,22 +193,127 @@ class ComputerBlockOverlay(QWidget):
         self.message = QLabel()
         self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.message.setStyleSheet("font-size:18px;")
-        cancel = QPushButton(_("Lever l’interdiction"))
-        cancel.setStyleSheet("padding:10px 18px; background:#5c252b; border:1px solid #ff8b8b;")
-        cancel.clicked.connect(controller.clear_computer_block)
+        self.grace_button = QPushButton(_("Enregistrer et fermer — 5 min"))
+        self.grace_button.setStyleSheet(
+            "padding:10px 18px; background:#b44b2a; border:1px solid #ffbb8b; font-weight:700;"
+        )
+        self.grace_button.clicked.connect(controller.start_computer_close_grace)
+        self.shutdown_button = QPushButton(_("Arrêter l’ordinateur"))
+        self.restart_button = QPushButton(_("Redémarrer l’ordinateur"))
+        for button in (self.shutdown_button, self.restart_button):
+            button.setStyleSheet(
+                "padding:10px 18px; background:#303036; border:1px solid #d7d7dc;"
+            )
+        self.shutdown_button.clicked.connect(controller.shutdown_computer)
+        self.restart_button.clicked.connect(controller.restart_computer)
+        self.cancel_button = QPushButton(_("Lever l’interdiction"))
+        self.cancel_button.setStyleSheet("padding:10px 18px; background:#5c252b; border:1px solid #ff8b8b;")
+        self.cancel_button.clicked.connect(controller.clear_computer_block)
+        self.admin_access_button = QPushButton(_("Accès administrateur"))
+        self.admin_access_button.setToolTip(_("Raccourci : Ctrl+Alt+L"))
+        self.admin_access_button.setStyleSheet(
+            "padding:4px 8px; color:#a98e92; background:transparent; "
+            "border:0; text-decoration:underline; font-size:11px;"
+        )
+        self.admin_access_button.clicked.connect(self._toggle_admin_access)
+        self.admin_access = QWidget()
+        self.admin_access.setStyleSheet(
+            "background:#32181c; border:1px solid #6f3a42; border-radius:7px;"
+        )
+        admin_layout = QVBoxLayout(self.admin_access)
+        admin_layout.setContentsMargins(14, 12, 14, 12)
+        admin_layout.setSpacing(7)
+        self.admin_username = QLineEdit()
+        self.admin_username.setPlaceholderText(_("Identifiant administrateur"))
+        self.admin_password = QLineEdit()
+        self.admin_password.setPlaceholderText(_("Mot de passe"))
+        self.admin_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.admin_status = QLabel()
+        self.admin_status.setStyleSheet("color:#ffb4b4; border:0; font-size:12px;")
+        self.admin_submit = QPushButton(_("Déverrouiller"))
+        self.admin_submit.clicked.connect(self._submit_admin_access)
+        self.admin_password.returnPressed.connect(self._submit_admin_access)
+        for widget in (
+            self.admin_username, self.admin_password, self.admin_status,
+            self.admin_submit,
+        ):
+            admin_layout.addWidget(widget)
+        self.admin_access.hide()
+        actions = QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(self.shutdown_button)
+        actions.addWidget(self.restart_button)
+        actions.addWidget(self.grace_button)
+        actions.addWidget(self.cancel_button)
+        actions.addStretch()
         layout.addStretch()
         layout.addWidget(title)
         layout.addWidget(self.message)
-        layout.addWidget(cancel, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addLayout(actions)
         layout.addStretch()
+        layout.addWidget(self.admin_access_button, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.admin_access, alignment=Qt.AlignmentFlag.AlignCenter)
+
+    def _toggle_admin_access(self):
+        visible = self.admin_access.isHidden()
+        self.admin_access.setVisible(visible)
+        self.admin_status.clear()
+        if visible:
+            self.admin_username.setFocus()
+
+    def _submit_admin_access(self):
+        username = self.admin_username.text().strip()
+        password = self.admin_password.text()
+        if not username or not password:
+            self.admin_status.setText(_("Renseignez l’identifiant et le mot de passe."))
+            return
+        self.admin_submit.setEnabled(False)
+        try:
+            result = self.controller.unlock_computer_block(username, password)
+        except Exception:
+            result = {"ok": False, "error": _("Connexion administrateur refusée.")}
+        finally:
+            self.admin_submit.setEnabled(True)
+            self.admin_password.clear()
+        if result and result.get("ok"):
+            self.admin_username.clear()
+            self.admin_status.clear()
+            self.admin_access.hide()
+            return
+        self.admin_status.setText(str(
+            (result or {}).get("error") or _("Connexion administrateur refusée.")
+        ))
+
+    def keyPressEvent(self, event):
+        if (
+            event.key() == Qt.Key.Key_L
+            and event.modifiers()
+            & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+            == (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
+        ):
+            self._toggle_admin_access()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
     def closeEvent(self, event):
         event.ignore()
 
-    def show_block(self, ends_at):
+    def show_block(self, ends_at, can_cancel=True, grace_available=True):
         end = datetime.fromisoformat(str(ends_at))
-        self.message.setText(_("Blocage actif jusqu’au {time}.").format(
-            time=end.astimezone().strftime("%d/%m/%Y à %H:%M")
+        self.message.setText(
+            _("Blocage actif jusqu’au {time}. Enregistrez vos documents avec le joker, ou arrêtez/redémarrez Windows normalement.").format(
+                time=end.astimezone().strftime("%d/%m/%Y à %H:%M")
+            )
+        )
+        self.grace_button.setEnabled(bool(grace_available))
+        self.grace_button.setText(
+            _("Enregistrer et fermer — 5 min")
+            if grace_available else _("Joker de fermeture déjà utilisé")
+        )
+        self.cancel_button.setVisible(bool(can_cancel))
+        self.admin_access_button.setVisible(bool(
+            getattr(self.controller, "admin_unlock_handler", None)
         ))
         screens = QApplication.screens()
         if screens:
@@ -189,18 +321,88 @@ class ComputerBlockOverlay(QWidget):
             for screen in screens[1:]:
                 geometry = geometry.united(screen.geometry())
             self.setGeometry(geometry)
+            # The global limitation deliberately covers the taskbar as well.
+            # Shutdown/restart remain available from the overlay itself.
+            self.clearMask()
+        # Win+D or a previous minimized occurrence must not leave an active
+        # whole-computer rule represented only by its ON switch. Restore the
+        # same window and reaffirm its native topmost state on every refresh.
+        self.setWindowState(
+            self.windowState() & ~Qt.WindowState.WindowMinimized
+        )
         self.show()
+        if sys.platform == "win32":
+            native_handle = int(self.winId())
+            user32.SetWindowPos(
+                native_handle, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            )
+            user32.SetForegroundWindow(native_handle)
         self.raise_()
         self.activateWindow()
+
+
+class ComputerGraceWindow(QWidget):
+    """Persistent countdown shown while the desktop is temporarily unblocked."""
+
+    def __init__(self, controller):
+        super().__init__(
+            None,
+            Qt.WindowType.Tool
+            | Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint,
+        )
+        self.setWindowTitle(_("Joker de fermeture — Usage Guard"))
+        self.setStyleSheet(
+            "background:#4a2416; color:white; border:2px solid #ff9d66; border-radius:8px;"
+        )
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(18, 12, 18, 12)
+        self.message = QLabel()
+        self.message.setStyleSheet("font-size:15px; font-weight:700; border:none;")
+        shutdown = QPushButton(_("Arrêter"))
+        restart = QPushButton(_("Redémarrer"))
+        shutdown.clicked.connect(controller.shutdown_computer)
+        restart.clicked.connect(controller.restart_computer)
+        layout.addWidget(self.message)
+        layout.addWidget(shutdown)
+        layout.addWidget(restart)
+
+    def closeEvent(self, event):
+        event.ignore()
+
+    def show_countdown(self, ends_at, now=None):
+        now = now or datetime.now().astimezone()
+        end = datetime.fromisoformat(str(ends_at))
+        remaining = max(0, int((end - now).total_seconds()))
+        minutes, seconds = divmod(remaining, 60)
+        self.message.setText(
+            _("Enregistrez et fermez vos applications — reblocage dans {minutes:02d}:{seconds:02d}").format(
+                minutes=minutes, seconds=seconds
+            )
+        )
+        screen = QApplication.primaryScreen()
+        if screen:
+            available = screen.availableGeometry()
+            self.adjustSize()
+            self.move(
+                available.center().x() - self.width() // 2,
+                available.bottom() - self.height() - 16,
+            )
+        self.show()
+        self.raise_()
 
 
 class AppLimiter(QObject):
     """Manage independent daily foreground limits for configured applications."""
 
     notification_requested = Signal(str, str, int)
-    email_notification_requested = Signal(str, str, str)
+    email_notification_requested = Signal(str, str, str, str)
 
-    def __init__(self, usage, limit_seconds=15, extension_seconds=15, warning_seconds=5):
+    def __init__(
+        self, usage, limit_seconds=15, extension_seconds=15, warning_seconds=5,
+        decision_mirror=None, admin_unlock_handler=None,
+    ):
         super().__init__()
         self.usage = usage
         self.default_settings = {
@@ -219,110 +421,224 @@ class AppLimiter(QObject):
         self.target_process_id = 0
         self.target_process_ids = []
         self.blocked = False
+        self.admin_unlock_handler = admin_unlock_handler
         self.overlay = LimitOverlay(self)
         self.computer_overlay = ComputerBlockOverlay(self)
+        self.computer_grace_window = ComputerGraceWindow(self)
         self._target_geometry = None
         self._notified_handles = set()
         self._warning_shown = set()
         self._computer_block_warning_shown = set()
         self._playing_seen_at = {}
         self._running_limits = []
+        self._decision_mirror_checks = 0
+        self._decision_mirror_mismatches = 0
+        self._decision_mirror_last_mismatch = None
+        self._decision_mirror_failures = 0
+        self._decision_mirror = decision_mirror
+        # PotPlayer is the seeded media limit. Other applications join this
+        # set automatically as soon as Windows exposes a media session for
+        # them, including a PAUSED or STOPPED session.
+        self._media_target_keys = {
+            key for key in self.policies if "potplayer" in key.casefold()
+        }
+        self._resume_after_extension = False
+        self._current_web_limit = None
+        self._personal_usage = {}
+        self._personal_usage_baselines = {}
+        self._displayed_computer_block = {}
+        self.follow_timer = QTimer(self)
+        self.follow_timer.setInterval(250)
+        self.follow_timer.timeout.connect(self.follow_target)
+        self.follow_timer.start()
 
-    def computer_block_status(self, now=None):
-        block = dict(self.usage.data.get("computer_block", {}))
+    def _stored_computer_blocks(self):
+        getter = getattr(self.usage, "computer_blocks", None)
+        if callable(getter):
+            return [dict(item) for item in getter()]
+        collection = self.usage.data.get("computer_blocks")
+        if isinstance(collection, list):
+            return [dict(item) for item in collection if isinstance(item, dict)]
+        legacy = self.usage.data.get("computer_block", {})
+        return [dict(legacy)] if isinstance(legacy, dict) and legacy else []
+
+    @staticmethod
+    def _computer_block_sort_timestamp(status, key):
         try:
-            now = now or datetime.now().astimezone()
-            if block.get("enabled") and block.get("mode") == "daily_duration":
-                policy = {
-                    "valid_from": block.get("valid_from", ""),
-                    "valid_from_time": block.get("valid_from_time", ""),
-                    "valid_until": block.get("valid_until", ""),
-                    "valid_until_time": block.get("valid_until_time", ""),
-                    "schedule_start": block.get("schedule_start", ""),
-                    "schedule_end": block.get("schedule_end", ""),
-                }
-                schedule = self._schedule_status(policy, now)
+            return datetime.fromisoformat(str(status.get(key) or "")).timestamp()
+        except (TypeError, ValueError):
+            return float("inf")
+
+    @classmethod
+    def _effective_computer_block(cls, statuses):
+        def priority(status):
+            if status.get("active"):
+                return (
+                    0, cls._computer_block_sort_timestamp(status, "ends_at"),
+                    cls._computer_block_sort_timestamp(status, "started_at"),
+                    str(status.get("block_id") or ""),
+                )
+            if status.get("pending"):
+                return (
+                    1, cls._computer_block_sort_timestamp(status, "started_at"),
+                    cls._computer_block_sort_timestamp(status, "ends_at"),
+                    str(status.get("block_id") or ""),
+                )
+            return (
+                2 if status.get("enabled") else 3,
+                cls._computer_block_sort_timestamp(status, "ends_at"),
+                float("inf"), str(status.get("block_id") or ""),
+            )
+        return dict(min(statuses, key=priority)) if statuses else {}
+
+    @staticmethod
+    def _schedule_computer_block_status(block, now):
+        start_time = datetime.strptime(block["daily_start"], "%H:%M").time()
+        end_time = datetime.strptime(block["daily_end"], "%H:%M").time()
+        if end_time == start_time:
+            raise ValueError("Heures de blocage identiques.")
+        crosses_midnight = end_time < start_time
+        first_day = (
+            date.fromisoformat(str(block["valid_from"]))
+            if block.get("valid_from") else None
+        )
+        last_day = (
+            date.fromisoformat(str(block["valid_until"]))
+            if block.get("valid_until") else None
+        )
+        first_boundary = (
+            datetime.combine(
+                first_day,
+                datetime.strptime(
+                    str(block.get("valid_from_time") or "00:00"), "%H:%M"
+                ).time(),
+            ).replace(tzinfo=now.tzinfo)
+            if first_day else None
+        )
+        last_boundary = (
+            datetime.combine(
+                last_day,
+                datetime.strptime(
+                    str(block.get("valid_until_time") or "23:59"), "%H:%M"
+                ).time(),
+            ).replace(tzinfo=now.tzinfo)
+            if last_day else None
+        )
+        if last_boundary and now >= last_boundary:
+            return {**block, "active": False, "pending": False}
+        occurrence_day = now.date()
+        if crosses_midnight and now.time().replace(tzinfo=None) < end_time:
+            occurrence_day -= timedelta(days=1)
+        if first_day:
+            occurrence_day = max(occurrence_day, first_day)
+        while True:
+            raw_start = datetime.combine(
+                occurrence_day, start_time
+            ).replace(tzinfo=now.tzinfo)
+            raw_end = datetime.combine(
+                occurrence_day + timedelta(days=1)
+                if crosses_midnight else occurrence_day,
+                end_time,
+            ).replace(tzinfo=now.tzinfo)
+            starts_at = max(raw_start, first_boundary or raw_start)
+            ends_at = min(raw_end, last_boundary or raw_end)
+            if starts_at < ends_at and now < ends_at:
+                break
+            occurrence_day += timedelta(days=1)
+            if last_day and occurrence_day > last_day:
+                return {**block, "active": False, "pending": False}
+        active = starts_at <= now < ends_at
+        return {
+            **block,
+            "started_at": starts_at.isoformat(timespec="seconds"),
+            "ends_at": ends_at.isoformat(timespec="seconds"),
+            "active": active,
+            "pending": not active and now < starts_at,
+        }
+
+    def _computer_block_status(self, block, now):
+        block = dict(block or {})
+        if not block.get("enabled"):
+            return {**block, "active": False, "pending": False}
+        try:
+            if block.get("mode") == "daily_duration":
+                if block.get("schedule_start") and block.get("schedule_end"):
+                    schedule = self._schedule_computer_block_status({
+                        **block,
+                        "daily_start": block.get("schedule_start"),
+                        "daily_end": block.get("schedule_end"),
+                    }, now)
+                else:
+                    starts_at = datetime.combine(
+                        now.date(), datetime.min.time()
+                    ).replace(tzinfo=now.tzinfo)
+                    ends_at = starts_at + timedelta(days=1)
+                    if block.get("valid_from"):
+                        starts_at = max(starts_at, datetime.combine(
+                            date.fromisoformat(str(block["valid_from"])),
+                            datetime.strptime(
+                                str(block.get("valid_from_time") or "00:00"),
+                                "%H:%M",
+                            ).time(),
+                        ).replace(tzinfo=now.tzinfo))
+                    if block.get("valid_until"):
+                        ends_at = min(ends_at, datetime.combine(
+                            date.fromisoformat(str(block["valid_until"])),
+                            datetime.strptime(
+                                str(block.get("valid_until_time") or "23:59"),
+                                "%H:%M",
+                            ).time(),
+                        ).replace(tzinfo=now.tzinfo))
+                    schedule = {
+                        **block,
+                        "started_at": starts_at.isoformat(timespec="seconds"),
+                        "ends_at": ends_at.isoformat(timespec="seconds"),
+                        "active": starts_at <= now < ends_at,
+                        "pending": now < starts_at,
+                    }
                 used = float(
                     self.usage.system_usage_for_day(now.date()).get("on", 0.0)
                 )
                 allowed = max(60, int(block.get("limit_seconds", 60)))
-                end = self._schedule_window_end(policy, now) or datetime.combine(
-                    now.date() + timedelta(days=1), datetime.min.time()
-                ).replace(tzinfo=now.tzinfo)
-                active = bool(schedule["active"] and used >= allowed)
-                pending = bool(schedule["pending"] or (schedule["active"] and used < allowed))
                 return {
-                    **block,
-                    "started_at": now.isoformat(timespec="seconds"),
-                    "ends_at": end.isoformat(timespec="seconds"),
-                    "active": active,
-                    "pending": pending,
+                    **schedule,
+                    "active": bool(schedule["active"] and used >= allowed),
+                    "pending": bool(
+                        schedule["pending"]
+                        or (schedule["active"] and used < allowed)
+                    ),
                     "seconds": round(used, 1),
                     "allowed": allowed,
                     "remaining": max(0.0, allowed - used),
                     "schedule_active": schedule["active"],
                     "schedule_pending": schedule["pending"],
                 }
-            if block.get("enabled") and block.get("mode") == "schedule":
-                start_time = datetime.strptime(block["daily_start"], "%H:%M").time()
-                end_time = datetime.strptime(block["daily_end"], "%H:%M").time()
-                crosses_midnight = end_time < start_time
-                first_day = date.fromisoformat(block["valid_from"]) if block.get("valid_from") else None
-                last_day = date.fromisoformat(block["valid_until"]) if block.get("valid_until") else None
-                first_boundary = (
-                    datetime.combine(
-                        first_day,
-                        datetime.strptime(block.get("valid_from_time") or "00:00", "%H:%M").time(),
-                    ).replace(tzinfo=now.tzinfo)
-                    if first_day else None
-                )
-                last_boundary = (
-                    datetime.combine(
-                        last_day,
-                        datetime.strptime(block.get("valid_until_time") or "23:59", "%H:%M").time(),
-                    ).replace(tzinfo=now.tzinfo)
-                    if last_day else None
-                )
-                if last_boundary and now >= last_boundary:
-                    return {**block, "active": False, "pending": False}
-                occurrence_day = now.date()
-                if (
-                    crosses_midnight
-                    and now.time().replace(tzinfo=None) < end_time
-                ):
-                    occurrence_day -= timedelta(days=1)
-                if first_day:
-                    occurrence_day = max(occurrence_day, first_day)
-                while True:
-                    raw_start = datetime.combine(occurrence_day, start_time).replace(tzinfo=now.tzinfo)
-                    raw_end = datetime.combine(
-                        occurrence_day + timedelta(days=1) if crosses_midnight else occurrence_day,
-                        end_time,
-                    ).replace(tzinfo=now.tzinfo)
-                    starts_at = max(raw_start, first_boundary or raw_start)
-                    ends_at = min(raw_end, last_boundary or raw_end)
-                    if starts_at < ends_at and now < ends_at:
-                        break
-                    occurrence_day += timedelta(days=1)
-                    if last_day and occurrence_day > last_day:
-                        return {**block, "active": False, "pending": False}
-                active = starts_at <= now < ends_at
-                pending = not active and now < starts_at
-                return {
-                    **block,
-                    "started_at": starts_at.isoformat(timespec="seconds"),
-                    "ends_at": ends_at.isoformat(timespec="seconds"),
-                    "active": active,
-                    "pending": pending,
-                }
+            if block.get("mode") == "schedule":
+                return self._schedule_computer_block_status(block, now)
             starts_at = datetime.fromisoformat(str(block["started_at"]))
             ends_at = datetime.fromisoformat(str(block["ends_at"]))
-            enabled = bool(block.get("enabled")) and starts_at < ends_at
-            active = enabled and starts_at <= now < ends_at
-            pending = enabled and now < starts_at
+            active = starts_at < ends_at and starts_at <= now < ends_at
+            pending = starts_at < ends_at and now < starts_at
         except (KeyError, TypeError, ValueError):
             active = pending = False
         return {**block, "active": active, "pending": pending}
+
+    def computer_block_statuses(self, now=None):
+        now = now or datetime.now().astimezone()
+        return [
+            self._computer_block_status(block, now)
+            for block in self._stored_computer_blocks()
+        ]
+
+    def computer_block_status(self, now=None, block_id=None):
+        statuses = self.computer_block_statuses(now)
+        if block_id is not None:
+            wanted = str(block_id)
+            return dict(next((
+                item for item in statuses
+                if str(item.get("block_id") or "") == wanted
+            ), {}))
+        return self._effective_computer_block(statuses)
 
     def computer_block_warning_seconds(self):
         warnings = [seconds for _, seconds in self._warning_rules("computer:all")]
@@ -352,72 +668,307 @@ class AppLimiter(QObject):
         starts_at = datetime.fromisoformat(str(status["started_at"]))
         return max(0, (starts_at - now).total_seconds()) <= warning_seconds
 
+    def _clear_computer_block_record(self, block_id):
+        try:
+            return self.usage.clear_computer_block(block_id)
+        except TypeError:
+            return self.usage.clear_computer_block()
+
+    def _set_effective_computer_block_mirror(self, status):
+        setter = getattr(self.usage, "set_effective_computer_block", None)
+        if callable(setter):
+            setter(status or None)
+
+    @staticmethod
+    def _computer_block_validity_expired(block, now):
+        if not block.get("valid_until"):
+            return False
+        try:
+            expires_at = datetime.combine(
+                date.fromisoformat(str(block["valid_until"])),
+                datetime.strptime(
+                    str(block.get("valid_until_time") or "23:59"), "%H:%M"
+                ).time(),
+            ).replace(tzinfo=now.tzinfo)
+        except (TypeError, ValueError):
+            return False
+        return now >= expires_at
+
+    @classmethod
+    def _computer_block_record_expired(cls, block, now):
+        if block.get("delete_after_expiry", True) is False:
+            return False
+        if cls._computer_block_validity_expired(block, now):
+            return True
+        if not block.get("enabled") or block.get("mode") in {
+            "schedule", "daily_duration",
+        }:
+            return False
+        try:
+            return now >= datetime.fromisoformat(str(block["ends_at"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _status_occurrence_matches(status, occurrence):
+        wanted = dict(occurrence or {})
+        return bool(
+            status.get("active")
+            and str(status.get("block_id") or "")
+            == str(wanted.get("block_id") or "")
+            and str(status.get("started_at") or "")
+            == str(wanted.get("started_at") or "")
+            and str(status.get("ends_at") or "")
+            == str(wanted.get("ends_at") or "")
+        )
+
     def refresh_computer_block(self, now=None):
-        block = self.usage.data.get("computer_block", {})
         now = now or datetime.now().astimezone()
-        if block.get("valid_until"):
-            try:
-                expires_at = datetime.combine(
-                    date.fromisoformat(str(block["valid_until"])),
-                    datetime.strptime(str(block.get("valid_until_time") or "23:59"), "%H:%M").time(),
-                ).replace(tzinfo=now.tzinfo)
-                if now >= expires_at:
-                    self.usage.clear_computer_block()
-                    self._computer_block_warning_shown.clear()
-                    self.computer_overlay.hide()
-                    return self.computer_block_status(now)
-            except (TypeError, ValueError):
-                pass
-        status = self.computer_block_status(now)
-        if status["active"]:
-            self.computer_overlay.show_block(status["ends_at"])
-        else:
-            self.computer_overlay.hide()
-            if status.get("pending"):
-                starts_at = datetime.fromisoformat(status["started_at"])
-                remaining = max(0, (starts_at - now).total_seconds())
-                for rule_id, warning_seconds in self._warning_rules("computer:all"):
-                    token = (str(status["started_at"]), rule_id)
-                    if remaining > warning_seconds or token in self._computer_block_warning_shown:
-                        continue
-                    self._computer_block_warning_shown.add(token)
-                    actor = str(status.get("actor") or "Utilisateur local")
-                    self._emit_notification(
-                        "limit_warning", "computer:all",
-                        f"Blocage imminent demandé par {actor} — Usage Guard",
-                        f"La limitation de l’ordinateur commencera dans {self._format_duration(remaining)} et durera jusqu’au {datetime.fromisoformat(status['ends_at']).astimezone().strftime('%d/%m/%Y à %H:%M')}.",
-                        0, rule_id=rule_id,
-                    )
+        grace_window = getattr(self, "computer_grace_window", None)
+        expired_ids = [
+            str(block.get("block_id") or "")
+            for block in self._stored_computer_blocks()
+            if self._computer_block_record_expired(block, now)
+        ]
+        for block_id in expired_ids:
+            self._clear_computer_block_record(block_id or None)
+        if expired_ids:
+            expired = set(expired_ids)
+            self._computer_block_warning_shown = {
+                token for token in self._computer_block_warning_shown
+                if str(token[0]) not in expired
+            }
+
+        statuses = self.computer_block_statuses(now)
+        effective = self._effective_computer_block(statuses)
+        self._set_effective_computer_block_mirror(effective)
+
+        for status in statuses:
+            if not status.get("pending"):
+                continue
+            starts_at = datetime.fromisoformat(str(status["started_at"]))
+            remaining = max(0, (starts_at - now).total_seconds())
+            for rule_id, warning_seconds in self._warning_rules("computer:all"):
+                token = (
+                    str(status.get("block_id") or ""),
+                    str(status["started_at"]), rule_id,
+                )
+                if (
+                    remaining > warning_seconds
+                    or token in self._computer_block_warning_shown
+                ):
+                    continue
+                self._computer_block_warning_shown.add(token)
+                actor = str(status.get("actor") or "Utilisateur local")
+                warning_only = status.get("enforcement_action") == "warn"
+                self._emit_notification(
+                    "limit_warning", "computer:all",
+                    (
+                        f"Avertissement planifié par {actor} — Usage Guard"
+                        if warning_only else
+                        f"Blocage imminent demandé par {actor} — Usage Guard"
+                    ),
+                    (
+                        f"La période surveillée commencera dans {self._format_duration(remaining)} et durera jusqu’au {datetime.fromisoformat(status['ends_at']).astimezone().strftime('%d/%m/%Y à %H:%M')}."
+                        if warning_only else
+                        f"La limitation de l’ordinateur commencera dans {self._format_duration(remaining)} et durera jusqu’au {datetime.fromisoformat(status['ends_at']).astimezone().strftime('%d/%m/%Y à %H:%M')}."
+                    ),
+                    0, rule_id=rule_id,
+                )
+
+        for status in statuses:
             if (
-                status.get("enabled")
-                and block.get("mode") != "schedule"
-                and self.usage.data.get("computer_block")
+                not status.get("active")
+                or status.get("enforcement_action") != "warn"
             ):
-                try:
-                    expired = now >= datetime.fromisoformat(str(block["ends_at"]))
-                except (KeyError, TypeError, ValueError):
-                    expired = False
-                if expired:
-                    self.usage.clear_computer_block()
-                    self._computer_block_warning_shown.clear()
+                continue
+            token = (
+                str(status.get("block_id") or ""),
+                str(status.get("started_at") or ""),
+                "warn-action-active",
+            )
+            if token in self._computer_block_warning_shown:
+                continue
+            self._computer_block_warning_shown.add(token)
+            actor = str(status.get("actor") or "Utilisateur local")
+            title = f"Avertissement demandé par {actor} — Usage Guard"
+            message = (
+                "La période surveillée de l’ordinateur est atteinte ; "
+                "son utilisation reste autorisée."
+            )
+            rules = self._notification_rules("limit_reached", "computer:all")
+            if not any(
+                "windows" in (rule.get("channels") or ["windows"])
+                for rule in rules
+            ):
+                self.notification_requested.emit(title, message, 0)
+            if rules:
+                self._emit_notification(
+                    "limit_reached", "computer:all", title, message, 0,
+                )
+
+        active = [
+            status for status in statuses
+            if status.get("active")
+            and status.get("enforcement_action") != "warn"
+        ]
+        grace_by_id = {
+            str(status.get("block_id") or ""): self._computer_close_grace(status)
+            for status in active
+        }
+        enforcing = [
+            status for status in active
+            if not grace_by_id[str(status.get("block_id") or "")].get("active")
+        ]
+        if enforcing:
+            displayed = self._effective_computer_block(enforcing)
+            grace = grace_by_id[str(displayed.get("block_id") or "")]
+            displayed["close_grace"] = grace
+            self._displayed_computer_block = self._computer_block_occurrence(displayed)
+            if grace_window is not None:
+                grace_window.hide()
+            self.computer_overlay.show_block(
+                displayed["ends_at"],
+                can_cancel=(
+                    not self._decision_core_enabled()
+                    or not is_backend_managed(displayed)
+                ),
+                grace_available=bool(grace.get("available")),
+            )
+            return displayed
+
+        self._displayed_computer_block = {}
+        self.computer_overlay.hide()
+        active_graces = [
+            grace_by_id[str(status.get("block_id") or "")]
+            for status in active
+            if grace_by_id[str(status.get("block_id") or "")].get("active")
+        ]
+        if grace_window is not None:
+            if active_graces:
+                grace = min(
+                    active_graces,
+                    key=lambda item: str(item.get("ends_at") or ""),
+                )
+                grace_window.show_countdown(grace["ends_at"], now)
+            else:
+                grace_window.hide()
+        if effective.get("active"):
+            effective["close_grace"] = grace_by_id.get(
+                str(effective.get("block_id") or ""), {}
+            )
+        return effective
+
+    @staticmethod
+    def _computer_block_occurrence(status):
+        return {
+            "block_id": str(status.get("block_id") or ""),
+            "mode": str(status.get("mode") or ""),
+            "started_at": str(status.get("started_at") or ""),
+            "ends_at": str(status.get("ends_at") or ""),
+            "grace_seconds": int(status.get("grace_seconds", 300) or 300),
+        }
+
+    def _computer_close_grace(self, status, start=False):
+        service = getattr(self, "_decision_mirror", None)
+        if service is None:
+            return {
+                "state": "unavailable", "available": False,
+                "active": False, "used": False,
+            }
+        try:
+            return service.computer_block_grace(
+                self._computer_block_occurrence(status), start=start
+            )
+        except (OSError, EOFError, RuntimeError, ValueError):
+            return {
+                "state": "unavailable", "available": False,
+                "active": False, "used": False,
+            }
+
+    def computer_block_snapshot(self, now=None):
+        status = self.computer_block_status(now)
+        if status.get("active"):
+            status["close_grace"] = self._computer_close_grace(status)
         return status
 
-    def clear_computer_block(self):
-        self.usage.clear_computer_block()
-        self._computer_block_warning_shown.clear()
+    def computer_blocks_snapshot(self, now=None):
+        statuses = self.computer_block_statuses(now)
+        for status in statuses:
+            if status.get("active"):
+                status["close_grace"] = self._computer_close_grace(status)
+        return statuses
+
+    def displayed_computer_block(self):
+        return dict(getattr(self, "_displayed_computer_block", {}) or {})
+
+    def start_computer_close_grace(self):
+        occurrence = self.displayed_computer_block()
+        status = self.computer_block_status(
+            block_id=occurrence.get("block_id")
+        ) if occurrence else {}
+        if not self._status_occurrence_matches(status, occurrence):
+            return False
+        grace = self._computer_close_grace(status, start=True)
+        if not grace.get("active"):
+            return False
+        self.refresh_computer_block()
+        return True
+
+    @staticmethod
+    def _launch_power_operation(operation):
+        argument = "/s" if operation == "shutdown" else "/r"
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        return subprocess.Popen(
+            ["shutdown.exe", argument, "/t", "0"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=flags,
+        )
+
+    def request_power_operation(self, operation):
+        if operation not in {"shutdown", "restart"}:
+            raise ValueError("Opération d’alimentation invalide.")
         self.computer_overlay.hide()
-        # PotPlayer is the seeded media limit. Other applications join this
-        # set automatically as soon as Windows exposes a media session for
-        # them, including a PAUSED or STOPPED session.
-        self._media_target_keys = {
-            key for key in self.policies if "potplayer" in key.casefold()
+        grace_window = getattr(self, "computer_grace_window", None)
+        if grace_window is not None:
+            grace_window.hide()
+        launcher = getattr(self, "_power_launcher", self._launch_power_operation)
+        launcher(operation)
+        return True
+
+    def shutdown_computer(self):
+        return self.request_power_operation("shutdown")
+
+    def restart_computer(self):
+        return self.request_power_operation("restart")
+
+    def unlock_computer_block(self, username, password):
+        """Delegate a discreet administrator unlock to the protected service."""
+        handler = self.admin_unlock_handler
+        if not callable(handler):
+            return {
+                "ok": False,
+                "error": _("Déverrouillage administrateur indisponible."),
+            }
+        return dict(handler(username, password) or {})
+
+    def clear_computer_block(self):
+        occurrence = self.displayed_computer_block()
+        block_id = str(occurrence.get("block_id") or "")
+        status = self.computer_block_status(block_id=block_id) if block_id else {}
+        if not self._status_occurrence_matches(status, occurrence):
+            return False
+        if self._decision_core_enabled() and is_backend_managed(status):
+            return False
+        self._clear_computer_block_record(block_id)
+        self._computer_block_warning_shown = {
+            token for token in self._computer_block_warning_shown
+            if str(token[0]) != block_id
         }
-        self._resume_after_extension = False
-        self._current_web_limit = None
-        self.follow_timer = QTimer(self)
-        self.follow_timer.setInterval(250)
-        self.follow_timer.timeout.connect(self.follow_target)
-        self.follow_timer.start()
+        self.refresh_computer_block()
+        return True
 
     def _migrate_legacy_potplayer_limit(self):
         """Move the old PotPlayer test limit once, without creating a new one."""
@@ -453,6 +1004,143 @@ class AppLimiter(QObject):
                 measured_target_key=self._policy_target_key(key, policy),
             )
 
+    def activate_personal_policy(self, owner, revision, limits):
+        """Atomically overlay server rules while retaining local settings."""
+        owner = str(owner or "").strip()
+        revision = int(revision)
+        if not owner or revision < 1 or not isinstance(limits, list):
+            raise ValueError("Politique personnelle invalide.")
+        desired = {}
+        for source in limits:
+            if not isinstance(source, dict):
+                raise ValueError("Limite personnelle invalide.")
+            key = self._canonical_limit_target(
+                str(source.get("key") or source.get("target_key") or "").strip()
+            )
+            measured_target = self._canonical_limit_target(
+                str(source.get("target_key") or key).strip()
+            )
+            if (
+                not key.startswith(("app:", "site:", "category:"))
+                or not measured_target.startswith(
+                    ("app:", "site:", "category:")
+                )
+                or key in desired
+            ):
+                raise ValueError("Cible de limite personnelle invalide.")
+            settings = {
+                name: value for name, value in source.items()
+                if name not in {"key", "operation_id"}
+            }
+            settings["managed_by"] = "backend"
+            settings["target_key"] = measured_target
+            desired[key] = self.usage.normalize_app_limit_settings(key, settings)
+
+        overlay = dict(self.usage.data.get("personal_policy_overlay") or {})
+        if (
+            overlay.get("active")
+            and str(overlay.get("owner") or "").casefold() != owner.casefold()
+        ):
+            raise ValueError("Une politique d’un autre utilisateur est active.")
+        if (
+            overlay.get("active")
+            and int(overlay.get("revision") or 0) == revision
+            and self.usage.data.get("app_limit_settings") == desired
+        ):
+            return copy.deepcopy(desired)
+        backup = (
+            copy.deepcopy(overlay.get("local_settings"))
+            if overlay.get("active")
+            else copy.deepcopy(self.usage.data.get("app_limit_settings", {}))
+        )
+        if not isinstance(backup, dict):
+            raise ValueError("Sauvegarde des limites locales invalide.")
+
+        self.usage.data["app_limit_settings"] = copy.deepcopy(desired)
+        self.usage.data["personal_policy_overlay"] = {
+            "active": True,
+            "owner": owner,
+            "revision": revision,
+            "local_settings": backup,
+        }
+        self.usage._dirty = True
+        self.usage.save(force=True)
+        self._reload_policies()
+        if self.blocked and (
+            self.target_key not in self.policies
+            or not self.policies[self.target_key].get("enabled")
+        ):
+            self.unblock_target()
+        return copy.deepcopy(desired)
+
+    def deactivate_personal_policy(self):
+        """Restore the exact local settings saved before the server overlay."""
+        overlay = dict(self.usage.data.get("personal_policy_overlay") or {})
+        if not overlay.get("active"):
+            return False
+        backup = overlay.get("local_settings")
+        if not isinstance(backup, dict):
+            raise ValueError("Sauvegarde des limites locales invalide.")
+        self.usage.data["app_limit_settings"] = copy.deepcopy(backup)
+        self.usage.data["personal_policy_overlay"] = {}
+        self.usage._dirty = True
+        self.usage.save(force=True)
+        self._reload_policies()
+        if self.blocked and (
+            self.target_key not in self.policies
+            or not self.policies[self.target_key].get("enabled")
+        ):
+            self.unblock_target()
+        self.clear_personal_usage()
+        return True
+
+    def set_personal_usage(self, usage_state):
+        """Use a server-unioned snapshot plus this PC's subsequent activity."""
+        source = dict(usage_state or {})
+        totals = source.get("totals")
+        if not isinstance(totals, dict):
+            self.clear_personal_usage()
+            return False
+        token = (
+            str(source.get("usage_guard_username") or ""),
+            int(source.get("policy_revision") or 0),
+            str(source.get("measured_at") or ""),
+        )
+        if token != self._personal_usage.get("token"):
+            normalized = {}
+            baselines = {}
+            for key, value in totals.items():
+                try:
+                    seconds = max(0.0, float(dict(value).get("seconds", 0.0)))
+                except (TypeError, ValueError):
+                    continue
+                normalized[str(key)] = seconds
+                baselines[str(key)] = float(
+                    self.usage.app_limit_state_for_day(str(key))["seconds"]
+                )
+            self._personal_usage = {"token": token, "totals": normalized}
+            self._personal_usage_baselines = baselines
+        return True
+
+    def clear_personal_usage(self):
+        self._personal_usage = {}
+        self._personal_usage_baselines = {}
+
+    def _effective_limit_state(self, target_key):
+        state = dict(self.usage.app_limit_state_for_day(target_key))
+        policy = self.policies.get(target_key, {})
+        personal_usage = getattr(self, "_personal_usage", {})
+        remote = personal_usage.get("totals", {}).get(target_key)
+        if policy.get("managed_by") != "backend" or remote is None:
+            return state
+        baselines = getattr(self, "_personal_usage_baselines", {})
+        baseline = float(baselines.get(target_key, state["seconds"]))
+        state["seconds"] = max(
+            float(state["seconds"]),
+            float(remote) + max(0.0, float(state["seconds"]) - baseline),
+        )
+        return state
+
     def label_for_key(self, target_key):
         target_key = self._policy_target_key(target_key)
         if str(target_key).startswith("category:"):
@@ -486,33 +1174,51 @@ class AppLimiter(QObject):
                 if rule.get("enabled")
                 and str(rule.get("id") or f"legacy-{index}") == str(rule_id)
             ]
-        if any("windows" in (rule.get("channels") or ["windows"]) for rule in rules):
-            self.notification_requested.emit(title, message, int(process_id or 0))
+        windows_rule = next((
+            rule for rule in rules
+            if "windows" in (rule.get("channels") or ["windows"])
+        ), None)
+        if windows_rule:
+            self.notification_requested.emit(
+                title, message, int(process_id or 0)
+            )
         signal = getattr(self, "email_notification_requested", None)
-        recipients = {
-            str(rule.get("email_recipient", "")).strip()
-            for rule in rules
-            if "email" in (rule.get("channels") or ["windows"])
-            and str(rule.get("email_recipient", "")).strip()
-        }
-        for recipient in sorted(recipients):
+        recipient_rules = {}
+        for rule in rules:
+            recipient = str(rule.get("email_recipient", "")).strip()
+            if "email" in (rule.get("channels") or ["windows"]) and recipient:
+                recipient_rules.setdefault(recipient, rule)
+        for recipient in sorted(recipient_rules):
             if signal is not None:
-                signal.emit(title, message, recipient)
+                signal.emit(kind, title, message, recipient)
 
-    def _notify_limit_reached(self, target_key, state):
+    def _notify_limit_reached(self, target_key, state, warning_only=False):
         token = (
             target_key,
             f"duration-reached:{int(bool(state.get('extension_used')))}:{date.today().isoformat()}",
         )
-        if token in self._warning_shown or not self._notification_enabled("limit_warning", target_key):
+        configured = self._notification_enabled("limit_reached", target_key)
+        if token in self._warning_shown or (not configured and not warning_only):
             return
         self._warning_shown.add(token)
-        self._emit_notification(
-            "limit_warning", target_key,
-            f"{self.target_label} — limite atteinte",
-            "La durée autorisée est atteinte. L’utilisation est maintenant bloquée.",
-            self.target_process_id,
+        title = _("{label} — limite atteinte").format(label=self.target_label)
+        message = (
+            _("La durée définie est atteinte. L’utilisation reste autorisée en mode avertissement.")
+            if warning_only else
+            _("La durée autorisée est atteinte. L’utilisation est maintenant bloquée.")
         )
+        if warning_only and not any(
+            "windows" in (rule.get("channels") or ["windows"])
+            for rule in self._notification_rules("limit_reached", target_key)
+        ):
+            self.notification_requested.emit(
+                title, message, int(self.target_process_id or 0)
+            )
+        if configured:
+            self._emit_notification(
+                "limit_reached", target_key, title, message,
+                self.target_process_id,
+            )
 
     def _notify_extension_started(self, target_key, state, policy):
         if (
@@ -528,9 +1234,12 @@ class AppLimiter(QObject):
         self._warning_shown.add(token)
         self._emit_notification(
             "limit_extension", target_key,
-            f"{self.target_label} — joker utilisé",
-            "La durée normale est dépassée. "
-            f"Le joker de {self._format_duration(policy['extension_seconds'])} est actif.",
+            _("{label} — joker utilisé").format(label=self.target_label),
+            _("La durée normale est dépassée. Le joker de {duration} est actif.").format(
+                duration=self._format_configured_duration(
+                    policy["extension_seconds"], policy.get("extension_unit")
+                )
+            ),
             self.target_process_id,
         )
 
@@ -641,6 +1350,21 @@ class AppLimiter(QObject):
             return f"{minutes} min {seconds:02d} s"
         return f"{seconds} s"
 
+    @staticmethod
+    def _format_configured_duration(seconds, unit=None):
+        seconds = max(0, int(round(seconds)))
+        if unit == "hours":
+            value, suffix = seconds / 3600, "h"
+        elif unit == "minutes":
+            value, suffix = seconds / 60, "min"
+        else:
+            return AppLimiter._format_duration(seconds)
+        number = (
+            str(int(value)) if value.is_integer()
+            else f"{value:.2f}".rstrip("0").rstrip(".")
+        )
+        return f"{number} {suffix}"
+
     def _refresh_running_limits(self):
         running = []
         for target_key, policy in self.policies.items():
@@ -664,6 +1388,7 @@ class AppLimiter(QObject):
                 "handles": [item[0] for item in windows],
                 "process_ids": list(dict.fromkeys(item[1] for item in windows)),
                 "limit_seconds": policy["limit_seconds"],
+                "enforcement_action": policy.get("enforcement_action", "block"),
                 "block_during_validity": bool(policy.get("block_during_validity")),
                 **status,
             })
@@ -683,10 +1408,17 @@ class AppLimiter(QObject):
             token = (item["key"], item["process_id"])
             self._notified_handles.add(token)
             if self._notification_enabled("limited_app_start", item["key"]):
+                warning_only = item.get("enforcement_action") == "warn"
                 message = (
-                    "Utilisation interdite pendant la période planifiée."
+                    (
+                        _("Période surveillée : un avertissement sera affiché.")
+                        if warning_only else
+                        _("Utilisation interdite pendant la période planifiée.")
+                    )
                     if item.get("block_during_validity")
-                    else f"Usage limité : {self._format_duration(item['limit_seconds'])}."
+                    else _("Usage limité : {duration}.").format(
+                        duration=self._format_duration(item["limit_seconds"])
+                    )
                 )
                 self._emit_notification(
                     "limited_app_start", item["key"],
@@ -716,7 +1448,10 @@ class AppLimiter(QObject):
         self._current_web_limit = None
         running_limits = self._refresh_running_limits()
         if self.blocked:
-            if self.target_key in self.policies and not self.current_status(self.target_key)["schedule_active"]:
+            if self.target_key in self.policies and (
+                not self.current_status(self.target_key)["schedule_active"]
+                or self.policies[self.target_key].get("enforcement_action") == "warn"
+            ):
                 self.unblock_target()
             else:
                 self.follow_target()
@@ -745,7 +1480,16 @@ class AppLimiter(QObject):
             for target_key, is_playing in session_targets.items()
             if is_playing
         ]
-        if countable:
+        # For browser video sites, the companion extension is the precise
+        # play/pause source. Windows media sessions may lag briefly after a
+        # pause and must not keep consuming the quota.
+        foreground_playing = bool(
+            getattr(context, "browser_media_playing", False)
+        )
+        if countable and (
+            not self._target_requires_playback(foreground_target)
+            or foreground_playing
+        ):
             for policy_key in self._policies_for_target(foreground_target):
                 policy = self.policies[policy_key]
                 if (
@@ -804,6 +1548,20 @@ class AppLimiter(QObject):
             getattr(target, "key", ""), getattr(target, "category", "")
         )
 
+    @staticmethod
+    def _target_requires_playback(target):
+        """Known video sites consume their quota only during actual playback."""
+        key = str(getattr(target, "key", "") or "").casefold()
+        if not key.startswith("site:"):
+            return False
+        # Imported lazily to keep this platform controller independent from
+        # configuration loading during module initialization.
+        from usage_guard import config
+        return any(
+            str(pattern).casefold().removeprefix("www.") in key
+            for pattern in getattr(config, "VIDEO_URL_PATTERNS", [])
+        )
+
     def _policies_for_key(self, target_key, target_category=""):
         matches = []
         target_key = self._canonical_limit_target(target_key)
@@ -839,6 +1597,7 @@ class AppLimiter(QObject):
         handles=None, process_ids=None, browser_managed=False,
     ):
         policy = self.policies[target_key]
+        warning_only = policy.get("enforcement_action") == "warn"
         status = self.current_status(target_key)
         if not status["schedule_active"]:
             return
@@ -847,9 +1606,15 @@ class AppLimiter(QObject):
             self._notified_handles.add(notification_token)
             if self._notification_enabled("limited_app_start", target_key):
                 message = (
-                    "Utilisation interdite pendant la période planifiée."
+                    (
+                        _("Période surveillée : l’utilisation reste autorisée.")
+                        if warning_only else
+                        _("Utilisation interdite pendant la période planifiée.")
+                    )
                     if policy.get("block_during_validity")
-                    else f"Usage limité : {self._format_duration(policy['limit_seconds'])}."
+                    else _("Usage limité : {duration}.").format(
+                        duration=self._format_duration(policy["limit_seconds"])
+                    )
                 )
                 self._emit_notification(
                     "limited_app_start", target_key,
@@ -865,31 +1630,62 @@ class AppLimiter(QObject):
         self.target_process_ids = list(dict.fromkeys(process_ids or [process_id]))
         if playback:
             self._playing_seen_at[target_key] = time.monotonic()
-        state = self.usage.app_limit_state_for_day(target_key)
+        state = self._effective_limit_state(target_key)
         self._notify_extension_started(target_key, state, policy)
         allowed = 0 if policy.get("block_during_validity") else policy["limit_seconds"] + (
             policy["extension_seconds"] if state["extension_used"] else 0
         )
         cutoff_block_token = (target_key, f"cutoff-block:{date.today().isoformat()}")
-        if status.get("time_blocked") and cutoff_block_token not in self._warning_shown and self._notification_enabled("limit_warning", target_key):
+        cutoff_configured = self._notification_enabled("limit_warning", target_key)
+        if (
+            status.get("time_blocked")
+            and cutoff_block_token not in self._warning_shown
+            and (cutoff_configured or warning_only)
+        ):
             self._warning_shown.add(cutoff_block_token)
-            self._emit_notification(
-                "limit_warning", target_key,
-                f"{self.target_label} — heure autorisée dépassée",
-                f"L’utilisation est interdite après {policy['blocked_after']}.",
-                self.target_process_id,
+            title = _("{label} — heure autorisée dépassée").format(
+                label=self.target_label
             )
+            message = (
+                _("L’heure définie ({time}) est dépassée ; l’utilisation reste autorisée en mode avertissement.").format(
+                    time=policy["blocked_after"]
+                ) if warning_only else
+                _("L’utilisation est interdite après {time}.").format(
+                    time=policy["blocked_after"]
+                )
+            )
+            if warning_only and not any(
+                "windows" in (rule.get("channels") or ["windows"])
+                for rule in self._notification_rules("limit_warning", target_key)
+            ):
+                self.notification_requested.emit(
+                    title, message, int(self.target_process_id or 0)
+                )
+            if cutoff_configured:
+                self._emit_notification(
+                    "limit_warning", target_key, title, message,
+                    self.target_process_id,
+                )
         if state["seconds"] >= allowed or status.get("time_blocked"):
             if state["seconds"] >= allowed:
-                self._notify_limit_reached(target_key, state)
-            if not browser_managed:
+                self._notify_limit_reached(
+                    target_key, state, warning_only=warning_only
+                )
+            if warning_only:
+                self.usage.add_app_limit_seconds(
+                    target_key, elapsed, date.today()
+                )
+            elif not browser_managed:
                 self.block_target()
             return
-        state = self.usage.add_app_limit_seconds(target_key, elapsed, date.today())
+        self.usage.add_app_limit_seconds(target_key, elapsed, date.today())
+        state = self._effective_limit_state(target_key)
         self._notify_extension_started(target_key, state, policy)
         if state["seconds"] >= allowed:
-            self._notify_limit_reached(target_key, state)
-            if not browser_managed:
+            self._notify_limit_reached(
+                target_key, state, warning_only=warning_only
+            )
+            if not warning_only and not browser_managed:
                 self.block_target()
             return
         remaining = allowed - state["seconds"]
@@ -903,8 +1699,16 @@ class AppLimiter(QObject):
             self._warning_shown.add(warning_token)
             self._emit_notification(
                 "limit_warning", target_key,
-                f"{self.target_label} — bientôt terminé",
-                f"Il reste {self._format_duration(remaining)} avant le blocage.",
+                (
+                    _("{label} — seuil bientôt atteint")
+                    if warning_only else _("{label} — bientôt terminé")
+                ).format(label=self.target_label),
+                (
+                    _("Il reste {duration} avant l’avertissement.")
+                    if warning_only else _("Il reste {duration} avant le blocage.")
+                ).format(
+                    duration=self._format_duration(remaining)
+                ),
                 self.target_process_id, rule_id=rule_id,
             )
         time_remaining = status.get("time_remaining")
@@ -919,8 +1723,17 @@ class AppLimiter(QObject):
                 self._warning_shown.add(cutoff_token)
                 self._emit_notification(
                     "limit_warning", target_key,
-                    f"{self.target_label} — bientôt interdit",
-                    f"Il reste {self._format_duration(time_remaining)} avant l’heure de fin autorisée.",
+                    (
+                        _("{label} — heure surveillée bientôt atteinte")
+                        if warning_only else _("{label} — bientôt interdit")
+                    ).format(label=self.target_label),
+                    (
+                        _("Il reste {duration} avant l’avertissement de fin de plage.")
+                        if warning_only else
+                        _("Il reste {duration} avant l’heure de fin autorisée.")
+                    ).format(
+                        duration=self._format_duration(time_remaining)
+                    ),
                     self.target_process_id, rule_id=rule_id,
                 )
 
@@ -941,12 +1754,15 @@ class AppLimiter(QObject):
                 "label": self.label_for_key(target_key),
                 "limit_seconds": policy["limit_seconds"],
                 "extension_seconds": policy["extension_seconds"],
+                "extension_unit": policy.get("extension_unit", "seconds"),
                 "warning_seconds": policy["warning_seconds"],
+                "enforcement_action": policy.get("enforcement_action", "block"),
                 **status,
             })
         self._current_web_limit = min(
             states,
             key=lambda item: (
+                item.get("enforcement_action") == "warn",
                 item["remaining"] > 0,
                 item["remaining"] / max(1, item["allowed"]),
             ),
@@ -1009,12 +1825,15 @@ class AppLimiter(QObject):
                 "label": self.label_for_key(target_key),
                 "limit_seconds": policy["limit_seconds"],
                 "extension_seconds": policy["extension_seconds"],
+                "extension_unit": policy.get("extension_unit", "seconds"),
                 "warning_seconds": policy["warning_seconds"],
+                "enforcement_action": policy.get("enforcement_action", "block"),
                 **status,
             })
         return min(
             states,
             key=lambda item: (
+                item.get("enforcement_action") == "warn",
                 item["remaining"] > 0,
                 item["remaining"] / max(1, item["allowed"]),
             ),
@@ -1035,9 +1854,15 @@ class AppLimiter(QObject):
             }
         return granted
 
-    def apply_settings(self, target_key, settings):
+    def apply_settings(self, target_key, settings, source="local"):
         target_key = self._canonical_limit_target(target_key)
         previous = self.policies.get(target_key)
+        if (
+            self._decision_core_enabled()
+            and source not in {SOURCE_INTERNAL, SOURCE_BACKEND, SOURCE_LOCAL_ADMIN}
+            and is_backend_managed(previous)
+        ):
+            raise ValueError("Cette limite est administrée à distance.")
         normalized = self.usage.set_app_limit_settings(target_key, settings)
         self.policies[target_key] = normalized
         if previous is None or any(
@@ -1049,20 +1874,79 @@ class AppLimiter(QObject):
                 measured_target_key=self._policy_target_key(target_key, normalized),
             )
             self._warning_shown = {token for token in self._warning_shown if token[0] != target_key}
-        if self.blocked and target_key == self.target_key and not normalized["enabled"]:
+        if self.blocked and target_key == self.target_key and (
+            not normalized["enabled"]
+            or normalized.get("enforcement_action") == "warn"
+        ):
             self.unblock_target()
         return normalized
 
-    def remove_limit(self, target_key):
+    def remove_limit(self, target_key, source="local"):
+        if (
+            self._decision_core_enabled()
+            and source not in {SOURCE_INTERNAL, SOURCE_BACKEND, SOURCE_LOCAL_ADMIN}
+            and is_backend_managed(self.policies.get(target_key))
+        ):
+            raise ValueError("Cette limite est administrée à distance.")
         if self.blocked and target_key == self.target_key:
             self.unblock_target()
         self.usage.remove_app_limit_settings(target_key)
         self.policies.pop(target_key, None)
 
+    def reload_after_target_deleted(self, target_key):
+        """Forget every rule measuring a permanently deleted activity.
+
+        A target can have several independent rules whose storage keys carry
+        a ``#uuid`` suffix.  ``AppUsageStore.delete_target`` removes all of
+        them atomically; this method mirrors that change in the live limiter
+        and immediately restores a window which one of those rules blocked.
+        """
+        target_key = self._canonical_limit_target(target_key)
+        removed_policy_keys = {
+            policy_key
+            for policy_key, policy in self.policies.items()
+            if (
+                policy_key == target_key
+                or self._policy_target_key(policy_key, policy) == target_key
+            )
+        }
+        should_unblock = bool(
+            self.blocked
+            and (
+                self.target_key in removed_policy_keys
+                or self.target_key == target_key
+            )
+        )
+        self._reload_policies()
+        self._warning_shown = {
+            token for token in self._warning_shown
+            if token[0] not in removed_policy_keys
+        }
+        self._notified_handles = {
+            token for token in self._notified_handles
+            if token[0] not in removed_policy_keys
+        }
+        for policy_key in removed_policy_keys:
+            self._playing_seen_at.pop(policy_key, None)
+        self._media_target_keys.discard(target_key)
+        self._running_limits = [
+            item for item in self._running_limits
+            if item.get("key") not in removed_policy_keys
+        ]
+        if should_unblock:
+            self.unblock_target()
+        if self._current_web_limit and str(
+            self._current_web_limit.get("target_key") or ""
+        ) in removed_policy_keys:
+            self._current_web_limit = None
+        return sorted(removed_policy_keys)
+
     def prune_expired_limits(self, now=None):
         now = now or datetime.now().astimezone()
         expired = []
         for target_key, policy in list(self.policies.items()):
+            if policy.get("delete_after_expiry", True) is False:
+                continue
             if not policy.get("valid_until"):
                 continue
             try:
@@ -1075,10 +1959,16 @@ class AppLimiter(QObject):
             if now >= expires_at:
                 expired.append(target_key)
         for target_key in expired:
-            self.remove_limit(target_key)
+            self.remove_limit(target_key, source=SOURCE_INTERNAL)
         return expired
 
-    def reset_today(self, target_key):
+    def reset_today(self, target_key, source="local"):
+        if (
+            self._decision_core_enabled()
+            and source not in {SOURCE_INTERNAL, SOURCE_BACKEND, SOURCE_LOCAL_ADMIN}
+            and is_backend_managed(self.policies.get(target_key))
+        ):
+            raise ValueError("Cette limite est administrée à distance.")
         policy = self.policies[target_key]
         self.usage.reset_app_limit_state(target_key)
         self.usage.prepare_app_limit(
@@ -1089,15 +1979,24 @@ class AppLimiter(QObject):
             self.unblock_target()
 
     def current_status(self, target_key):
+        # A few unit/integration adapters instantiate the limiter without the
+        # Qt constructor.  Keep observability counters lazy so evaluation
+        # itself never fails in that legitimate headless path.
+        if not hasattr(self, "_decision_mirror_checks"):
+            self._decision_mirror_checks = 0
+            self._decision_mirror_mismatches = 0
+            self._decision_mirror_failures = 0
+            self._decision_mirror_last_mismatch = {}
         policy = self.policies[target_key]
-        state = self.usage.app_limit_state_for_day(target_key)
+        state = self._effective_limit_state(target_key)
         allowed = 0 if policy.get("block_during_validity") else policy["limit_seconds"] + (
             policy["extension_seconds"] if state["extension_used"] else 0
         )
         duration_remaining = max(0.0, allowed - state["seconds"])
-        schedule = self._schedule_status(policy)
-        time_remaining = self._cutoff_remaining(policy) if schedule["active"] else None
-        return {
+        now = datetime.now().astimezone()
+        schedule = self._schedule_status(policy, now)
+        time_remaining = self._cutoff_remaining(policy, now) if schedule["active"] else None
+        legacy = {
             "seconds": state["seconds"],
             "extension_used": state["extension_used"],
             "allowed": allowed,
@@ -1107,6 +2006,71 @@ class AppLimiter(QObject):
             "schedule_active": schedule["active"],
             "schedule_pending": schedule["pending"],
         }
+        selected = legacy
+        if self._decision_core_enabled():
+            try:
+                mirror = getattr(self, "_decision_mirror", None)
+                mirrored = (
+                    mirror.evaluate(policy, state, now)
+                    if mirror is not None
+                    else evaluate_limit(policy, state, now).as_status()
+                )
+                self._decision_mirror_checks += 1
+                if mirrored != legacy:
+                    self._decision_mirror_mismatches += 1
+                    self._decision_mirror_last_mismatch = {
+                        "target_key": str(target_key),
+                        "legacy": legacy,
+                        "core": mirrored,
+                    }
+                elif mirror is not None:
+                    selected = mirrored
+            except (OSError, EOFError, RuntimeError) as error:
+                self._decision_mirror_failures += 1
+                self._decision_mirror_last_mismatch = {
+                    "target_key": str(target_key),
+                    "transport_error": str(error),
+                }
+        return selected
+
+    def decision_mirror_status(self):
+        enabled = self._decision_core_enabled()
+        mirror = getattr(self, "_decision_mirror", None)
+        service = (
+            mirror.status()
+            if enabled and mirror is not None
+            else {"enabled": False, "connected": False, "pid": 0, "error": ""}
+        )
+        healthy = bool(
+            not enabled
+            or (
+                self._decision_mirror_mismatches == 0
+                and self._decision_mirror_failures == 0
+                and (not service["enabled"] or service["connected"])
+            )
+        )
+        authority = (
+            "service"
+            if enabled and healthy and service["enabled"] and service["connected"]
+            else "legacy"
+        )
+        return {
+            "enabled": enabled,
+            "checks": int(self._decision_mirror_checks if enabled else 0),
+            "mismatches": int(self._decision_mirror_mismatches if enabled else 0),
+            "failures": int(self._decision_mirror_failures if enabled else 0),
+            "healthy": healthy,
+            "authority": authority,
+            "service": service,
+            "last_mismatch": self._decision_mirror_last_mismatch if enabled else None,
+        }
+
+    def _decision_core_enabled(self):
+        mirror = getattr(self, "_decision_mirror", None)
+        return bool(
+            not current_profile().production
+            or (mirror is not None and getattr(mirror, "external_service", False))
+        )
 
     @staticmethod
     def _schedule_status(policy, now=None):
@@ -1170,6 +2134,29 @@ class AppLimiter(QObject):
         return {"active": False, "pending": True}
 
     @staticmethod
+    def _schedule_window_start(policy, now=None):
+        start_text = str(policy.get("schedule_start", "")).strip()
+        end_text = str(policy.get("schedule_end", "")).strip()
+        if not start_text or not end_text:
+            return None
+        now = now or datetime.now().astimezone()
+        start_time = datetime.strptime(start_text, "%H:%M").time()
+        end_time = datetime.strptime(end_text, "%H:%M").time()
+        crosses_midnight = end_time < start_time
+        occurrence_days = [now.date()]
+        if crosses_midnight:
+            occurrence_days.insert(0, now.date() - timedelta(days=1))
+        for occurrence_day in occurrence_days:
+            start = datetime.combine(occurrence_day, start_time).replace(tzinfo=now.tzinfo)
+            end = datetime.combine(
+                occurrence_day + timedelta(days=1) if crosses_midnight else occurrence_day,
+                end_time,
+            ).replace(tzinfo=now.tzinfo)
+            if start <= now < end:
+                return start
+        return None
+
+    @staticmethod
     def _schedule_window_end(policy, now=None):
         start_text = str(policy.get("schedule_start", "")).strip()
         end_text = str(policy.get("schedule_end", "")).strip()
@@ -1207,6 +2194,8 @@ class AppLimiter(QObject):
     def block_target(self):
         if not self._valid_target() or self.target_key not in self.policies:
             return
+        if self.policies[self.target_key].get("enforcement_action") == "warn":
+            return
         rect = wintypes.RECT()
         if user32.GetWindowRect(self.target_handle, ctypes.byref(rect)):
             self._target_geometry = (
@@ -1235,6 +2224,7 @@ class AppLimiter(QObject):
             self.target_label,
             not state["extension_used"] and not policy.get("block_during_validity"),
             policy["extension_seconds"],
+            policy.get("extension_unit", "seconds"),
             bool(policy.get("block_during_validity")),
         )
         self.position_overlay()

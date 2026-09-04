@@ -1,158 +1,215 @@
-# Journal des versions
+# Changelog
 
-15/08/2026 15:56 — développement local — La création d’une limitation regroupe les applications sans catégorie dans une branche dédiée ; un blocage par période interdit désormais directement la cible entre les dates et heures saisies, sans demander ensuite une durée quotidienne.
+This ledger records backend and PWA releases. The signed Windows client
+uses the independent version declared in `client_version.py`. Detailed notes
+for the early private-development iterations remain available in Git history;
+they are condensed here to keep the public release history readable.
 
-15/08/2026 15:50 — développement local — Le bandeau de limite de l’extension navigateur tient désormais sur une seule ligne compacte, avec la barre de progression entre le libellé et le temps restant.
+## Release ledger
 
-## Développement local
-
-15/08/2026 15:35 — développement local — Une limite quotidienne créée après le début de lâ€™utilisation reprend désormais le total journalier exact déjà mesuré, y compris pour les catégories ; le compteur et la rallonge repartent à zéro chaque jour et une réinitialisation explicite conserve un compteur nul.
-
-15/08/2026 15:25 — migration locale — Les totaux journaliers antérieurs à lâ€™enregistrement des sessions sont convertis en sessions historiques estimées par journée et par activité ; les durées restent exactes et les horaires sont explicitement marqués comme reconstruits.
-
-15/08/2026 15:20 — développement local — Les frises masquent les programmes seulement ouverts mais jamais utilisés, afin de refléter les activités réelles sans supprimer les données brutes.
-
-15/08/2026 14:55 — développement local — Quitter Usage Guard ferme également sa fenêtre PWA locale dédiée, sans fermer un éventuel onglet normal du navigateur.
-
-15/08/2026 14:50 — développement local — La frise résout désormais les fenêtres Chrome installées comme PWA avec leur titre et leur libellé personnalisé, en fusionnant leurs périodes ouvertes et actives dans une seule ligne.
-
-15/08/2026 14:45 — développement local — Une limitation planifiée de tout l’ordinateur reste enregistrée jusqu’à sa date et son heure de fin réelles, même lorsque sa dernière plage horaire est déjà terminée.
-15/08/2026 14:40 — développement local — Le bandeau de limite de l’extension navigateur devient translucide et laisse passer les clics vers la page, tout en conservant le bouton de rallonge et l’overlay de blocage final.
-15/08/2026 14:35 — développement local — Dans la PWA distante, l’onglet Paramètres reste visible mais ne montre aucun contenu aux comptes non administrateurs ; les administrateurs n’y voient que la gestion des utilisateurs.
-15/08/2026 14:30 — documentation — The target architecture reference is now fully written in English and has been checked for sensitive information.
-15/08/2026 14:25 — build local — Le contrôle de relance identifie désormais directement le chemin de l’exécutable lancé, sans faux échec « chemin inconnu ».
-15/08/2026 14:15 — développement local — Dans « Dernière session Windows », chaque niveau est trié par temps d’utilisation décroissant ; un ordre manuel enregistré reste prioritaire pour les catégories concernées.
-15/08/2026 13:55 — développement local — Audit avant publication : secrets et dépendances contrôlés, fichiers d’exploitation privés retirés de Git, journaux désactivés par défaut, APIs limitées au loopback, origine du pont navigateur vérifiée, jetons d’URL supprimés et HTML dynamique échappé.
-15/08/2026 13:35 — développement local — README anglais réécrit avec une présentation précise du fonctionnement, des limites, notifications, interfaces, extension navigateur, données et architecture future, sans procédure de compilation ; build_exe.py est exclu de Git.
-15/08/2026 13:20 — développement local — Arrêt des évolutions fonctionnelles pour une passe de traduction : catalogue anglais du programme et du systray complété, choix de langue désormais appliqué immédiatement à la PWA et textes chargés dynamiquement traduits.
-15/08/2026 12:55 — développement local — Seuils de notification par durée ou horaire et par cible choisie dans l’arborescence réelle, avec les catégories de sites sous le navigateur renommé, validité permanente ou datée et suppression limitée aux échéances effectivement expirées. Les préavis affichent désormais toutes leurs durées, avec ajout, modification et activation groupée sans remplacement des valeurs existantes.
-15/08/2026 12:44 — développement local — La création d’un préavis global avant les limites ne recherche plus une limite individuelle inexistante et s’enregistre correctement.
-15/08/2026 12:36 — développement local — Le déploiement valide désormais ses paramètres avant exécution et affiche une erreur courte, lisible et précise à la place du code 2 et de la pile PowerShell.
-15/08/2026 12:28 — développement local — La limitation de tout l’ordinateur dispose désormais du même bouton compact ON/OFF que les autres limites, en conservant sa planification et son auteur lorsqu’elle est désactivée.
-15/08/2026 12:20 — développement local — Activation et désactivation des limitations et notifications accessibles par des boutons compacts verts ou rouges directement dans chaque carte.
-15/08/2026 12:14 — développement local — Infobulle du systray recentrée sur la seule liste des limitations du jour, avec un titre explicite et sans résumé du temps actif.
-15/08/2026 12:06 — développement local — Déplacement des catégories et sous-catégories de sites rendu directement accessible par un bouton et un choix précis avant ou après tout élément du même niveau.
-15/08/2026 11:58 — développement local — Toutes les saisies de durée proposent désormais une valeur accompagnée d’une unité Minutes ou Heures.
-15/08/2026 11:50 — build local — Gestion explicite de plusieurs préavis avant limite, avec liste des délais configurés, ajout rapide et validation renforcée. Le build referme aussi toute ancienne instance relancée pendant la compilation.
-
-20/06/2026 21:01 — v0.1 — Première preuve de concept.
-20/06/2026 21:10 — git `03ee18f` — Statut expérimental de la v0.1 précisé.
-20/06/2026 21:14 — git `db33429` — ActivityWatch ajouté aux prérequis.
-03/08/2026 08:36 — git `3e38ac6` — Suivi d’activité et catégories améliorés.
-03/08/2026 10:11 — git `6e2556d` — Statistiques persistantes et suivi multimédia corrigés.
-03/08/2026 10:16 — git `c4952e6` — Exclusion des usages multimédias passifs ajoutée.
-03/08/2026 10:19 — git `11b459e` — Temps d’allumage du PC ajouté.
-03/08/2026 12:41 — git `ec2e113` — Arbre des activités et suivi améliorés.
-03/08/2026 13:02 — git `e744656` — Attribution de YouTube Shelf corrigée.
-04/08/2026 07:39 — git `3d1c782` — Catégories et sites du navigateur améliorés.
-04/08/2026 20:06 — git `7046b12` — Démarrage depuis la barre système rendu plus fluide.
-09/08/2026 15:14 — git `9ec7f41` — Sélection d’une date ajoutée aux usages.
-13/08/2026 00:57 — git `8fbdd8a` — Premières limites et base de la PWA distante.
-13/08/2026 01:05 — git `66114ea` — Tableau de bord remplacé par la PWA locale.
-13/08/2026 01:30 — git `45ed129` — Limites corrigées et historique protégé.
-13/08/2026 01:45 — git `1507cb0` — Ouverture du tableau de bord dans Brave.
-13/08/2026 01:54 — git `ff5dcaf` — Arbre interactif restauré dans la PWA.
-13/08/2026 02:09 — git `ba465b2` — Analyse par catégorie et progression ajoutées.
-13/08/2026 02:16 — git `b16ea4a` — Placement des notifications amélioré.
-13/08/2026 02:23 — git `daa11e4` — Cibles multimédias mises en évidence.
-13/08/2026 02:28 — git `40949bb` — Interface PWA simplifiée en listes.
-13/08/2026 02:30 — git `88fd25f` — Fenêtre de progression rendue opaque.
-13/08/2026 02:46 — git `cc3e5c8` — Annulation des formulaires invalides corrigée.
-13/08/2026 02:52 — git `ec9938f` — Onglet d’organisation redondant retiré.
-14/08/2026 00:36 — git `ef2bff7` — Backend distant et suivi des sessions consolidés.
-15/08/2026 07:27 — build local — Infobulle système corrigée et suppression définitive des limites respectée après redémarrage ou recompilation.
-15/08/2026 07:44 — build local — Création de limite séparée entre catégorie et activité directe, avec annulation rapide généralisée aux parcours progressifs.
-15/08/2026 07:52 — build local — Navigation uniformisée sur « Retour » dans tous les parcours et formulaires.
-15/08/2026 08:01 — build local — Assistants normalisés avec un unique bouton « Retour » placé après les choix.
-15/08/2026 08:08 — build local — Limitation de l’ordinateur planifiable avec saisies directes et catégories techniques masquées.
-15/08/2026 08:22 — build local — Notifications configurables et limite horaire par application ou catégorie ajoutées.
-15/08/2026 08:47 — build local — Planification des limites par jour précis et plage horaire, formulaires détaillés et état vide retiré.
-15/08/2026 08:52 — build local — Réorganisation visuelle des catégories rendue accessible par poignée ou menu contextuel, sans changement de niveau.
-15/08/2026 09:10 — build local — Rafraîchissement stabilisé : les compteurs restent à jour sans reconstruire ni faire pulser les frises ouvertes.
-15/08/2026 09:12 — développement local — Blocage de l’ordinateur à une heure précise pour un jour ou une durée aujourd’hui, auteur ajouté aux notifications et cache PWA fiabilisé pour les mises à jour.
-15/08/2026 09:30 — développement local — Grille des catégories réparée et toutes les notifications rendues exclusivement dépendantes des règles créées dans l’onglet Notifications.
-15/08/2026 09:55 — développement local — Blocage de l’ordinateur défini par une heure de début et une heure de fin, sans saisie de durée.
-15/08/2026 10:15 — développement local — Création des limites unifiée par cible, avec validité permanente, date de début et date de fin.
-15/08/2026 10:25 — développement local — Heures de début et de fin ajoutées aux bornes datées de validité des limitations.
-15/08/2026 11:00 — développement local — Applications proposées au démarrage corrigées et préavis multiples permis pour l’ordinateur, une catégorie ou une activité.
-15/08/2026 11:15 — développement local — Notifications de démarrage et préavis rendus globaux, avec création toujours active et sans choix d’état final.
-15/08/2026 11:25 — développement local — Limitations de tout l’ordinateur toujours affichées dans l’infobulle système, y compris avant ou hors de leur plage horaire.
-15/08/2026 11:35 — développement local — Arrêt des processus PyInstaller effectué par arbre complet afin d’éviter les avertissements de nettoyage des dossiers temporaires `_MEI`.
-
-## Publications serveur
-
-13/08/2026 13:15 — v1.001 — Première mise en ligne du backend et de la PWA distante.
-13/08/2026 13:21 — v1.002 — Installation serveur, Apache et Fail2ban automatisés.
-13/08/2026 13:43 — v1.003 — Comptes distants et connexion sécurisée ajoutés.
-13/08/2026 13:45 — v1.004 — Restauration automatique d’Apache corrigée.
-13/08/2026 13:51 — v1.005 — Exclusion des autres sites de Brave corrigée.
-13/08/2026 15:00 — v1.006 — Rôles et droits des comptes ajoutés.
-13/08/2026 17:11 — v1.007 — Frise d’une activité accessible depuis l’arbre.
-13/08/2026 17:15 — v1.008 — Heure d’ouverture des applications précisée.
-13/08/2026 17:19 — v1.009 — Date du jour et création de limite ajoutées.
-13/08/2026 17:49 — v1.010 — Résumé de session et frises intégrées améliorés.
-13/08/2026 18:03 — v1.011 — Historique graphique et stockage distant ajoutés.
-13/08/2026 18:07 — v1.012 — Compte actif et déconnexion ajoutés à l’en-tête.
-13/08/2026 18:26 — v1.013 — Détection de l’accès distant corrigée.
-13/08/2026 18:46 — v1.014 — Administration des rôles et droits améliorée.
-13/08/2026 18:52 — v1.015 — Répartition visuelle de la session ajoutée.
-13/08/2026 19:05 — v1.016 — Affichage du compte et de la session corrigé.
-13/08/2026 19:11 — v1.017 — Analyse chronologique d’une session ajoutée.
-13/08/2026 19:19 — v1.018 — Frises regroupées et adaptées aux petits écrans.
-13/08/2026 19:27 — v1.019 — Événements d’ouverture et de fermeture ajoutés.
-13/08/2026 19:29 — v1.020 — Horaires de la chronologie corrigés.
-13/08/2026 19:41 — v1.021 — Fin de session et instant présent mieux indiqués.
-13/08/2026 22:42 — v1.022 — Chronologie redessinée et activité actuelle signalée.
-13/08/2026 23:02 — v1.023 — Mise à jour automatique de la PWA ajoutée.
-13/08/2026 23:46 — v1.024 — Affichage dynamique adapté à la sécurité distante.
-13/08/2026 23:49 — v1.025 — Politique de sécurité des styles corrigée.
-14/08/2026 12:26 — v1.026 — Notifications et interdiction globale du PC ajoutées.
-14/08/2026 12:54 — v1.027 — Déploiement serveur automatisé et textes précisés.
-14/08/2026 13:23 — v1.028 — Déplacement vers une catégorie ajouté.
-14/08/2026 13:39 — v1.029 — Défilement automatique pendant un déplacement ajouté.
-14/08/2026 14:03 — v1.030 — Statistiques par cible et période ajoutées.
-14/08/2026 16:19 — v1.031 — Réorganisation des catégories améliorée.
-14/08/2026 21:54 — v1.032 — Doublons et totaux des sites spécifiques corrigés.
-14/08/2026 22:17 — v1.033 — Résumé de session et panneaux simplifiés.
-14/08/2026 22:31 — v1.034 — Menus guidés pour analyses et notifications ajoutés.
-15/08/2026 06:44 — v1.035 — Création des limites et notifications guidée étape par étape.
-15/08/2026 07:27 — v1.036 — Paramètres restructurés, analyse replacée au-dessus du graphique, préavis configurables et auteurs des changements de limites affichés.
-15/08/2026 07:44 — v1.037 — Choix explicite entre catégorie et activité directe, avec boutons d’annulation et touche Échap dans les parcours progressifs.
-15/08/2026 08:10 — v1.038 — Navigation unifiée avec un seul bouton Retour, saisies directes, limitation par durée ou heure, notifications configurables et catégories techniques masquées.
-15/08/2026 08:47 — v1.039 — Limites planifiées par jour et plage horaire, blocage à heure précise, notifications configurables avec auteur, catégories réorganisables et frises stabilisées.
-15/08/2026 10:30 — v1.040 — Cibles de limite unifiées, validité datée à l’heure près, plages horaires, notifications configurables, catégories et frises stabilisées.
-15/08/2026 11:25 — v1.041 — Notifications globales au démarrage et avant les limites, créations toujours actives et limites ordinateur toujours visibles dans le systray.
-15/08/2026 11:47 — v1.042 — Durées en minutes ou heures, réorganisation des catégories, infobulle du systray centrée sur les limites et boutons compacts d’activation.
-15/08/2026 12:01 — v1.043 — Préavis multiples et globaux corrigés, unités de durée, catégories réorganisables, systray simplifié, boutons ON/OFF pour toutes les limites et déploiement fiabilisé.
-15/08/2026 12:46 — v1.044 — Seuils par durée ou horaire, cibles hiérarchiques, validité datée, échéances expirées supprimées et préavis multiples regroupés.
-15/08/2026 14:36 — v1.045 — Tri décroissant des activités et paramètres distants réservés aux administrateurs.
-15/08/2026 15:27 — v1.046 — Frises centrées sur les activités réelles et reconstruction des sessions historiques à partir des totaux journaliers.
-15/08/2026 16:02 — v1.047 — Cibles non classées regroupées et blocage direct par période avec dates et heures, sans durée quotidienne.
-16/08/2026 13:05 — v1.048 — Plages horaires sur deux jours, retours en haut des listes et affichage renforcé des limitations temporelles dans le systray.
-16/08/2026 14:02 — v1.049 — Correction des résumés quotidiens et suppression de la barre artificielle dans le systray.
-20/08/2026 10:00 — v1.050 — Quantification locale du flux téléversé vers le serveur avec reset manuel et moyenne par minute.
-20/08/2026 10:30 — v1.051 — Limitation ponctuelle immédiate, joker minimal de cinq minutes et analyse centrée sur les jours.
-20/08/2026 11:00 — v1.052 — Workflow de blocage unifié par ponctuel ou permanent, durée ou date, et cible.
-20/08/2026 12:34 — v1.053 — Sessions du jour et limites distantes en attente.
-20/08/2026 13:09 — v1.054 — Correction creation distante des limitations.
-20/08/2026 13:15 — v1.055 — Correction snapshot live et purge anciennes synchronisations.
-20/08/2026 13:22 — v1.056 — Purge visuelle des anciennes synchronisations en attente.
-20/08/2026 13:26 — v1.057 — Correction synchronisation limitation tout ordinateur.
-20/08/2026 13:40 — v1.058 — Correction recuperation des commandes distantes par le PC.
-20/08/2026 13:45 — v1.059 — Correction cibles analyse PWA distante.
-20/08/2026 14:00 — v1.060 — Synchronisation durable des limitations stockées sur le serveur vers le PC.
-20/08/2026 14:10 — v1.061 — Relivraison des limitations acquittées mais absentes du PC et publication complète de l’analyse distante.
-20/08/2026 14:20 — v1.062 — Relivraison des limitations absentes du PC et analyse distante complète.
-20/08/2026 14:30 — v1.063 — Purge des anciennes synchronisations et analyse distante depuis le store d’activité.
-20/08/2026 15:05 — v1.064 — Purge serveur réelle des commandes de limite obsolètes et reconstruction stricte de l’analyse distante.
-20/08/2026 15:25 — v1.065 — Purge automatique au démarrage des commandes distantes déjà récupérées ou acquittées.
-20/08/2026 15:35 — v1.066 — Purge des commandes anciennes même si elles viennent d’être reacquittées.
-20/08/2026 16:07 — v1.067 — Synchronisation des limites et reconstruction de l’analyse distante depuis l’activité.
-20/08/2026 16:15 — v1.068 — Actualisation automatique des limites et notification lors d’un quota déjà dépassé.
-20/08/2026 16:50 — v1.069 — Navigation web générique et chronologie masquée lors du repli.
-20/08/2026 17:10 — v1.070 — Notifications par e-mail configurables, chiffrées et test manuel.
-20/08/2026 17:50 — v1.071 — Configuration SMTP dans les paramètres et canaux Windows ou e-mail par notification.
-20/08/2026 18:27 — v1.072 — Notifications de connexion et déconnexion du client.
-20/08/2026 18:37 — v1.073 — Notifications isolées par utilisateur.
-20/08/2026 19:00 — v1.074 — Analyse des horaires et durées d'utilisation du PC.
-20/08/2026 19:03 — v1.075 — Analyse des horaires du PC, notifications par utilisateur et synchronisation distante fiabilisée.
+13/08/2026 13:15 — v1.001 — Historical pre-stable release.
+13/08/2026 13:21 — v1.002 — Historical pre-stable release.
+13/08/2026 13:43 — v1.003 — Historical pre-stable release.
+13/08/2026 13:45 — v1.004 — Historical pre-stable release.
+13/08/2026 13:51 — v1.005 — Historical pre-stable release.
+13/08/2026 15:00 — v1.006 — Historical pre-stable release.
+13/08/2026 17:11 — v1.007 — Historical pre-stable release.
+13/08/2026 17:15 — v1.008 — Historical pre-stable release.
+13/08/2026 17:19 — v1.009 — Historical pre-stable release.
+13/08/2026 17:49 — v1.010 — Historical pre-stable release.
+13/08/2026 18:03 — v1.011 — Historical pre-stable release.
+13/08/2026 18:07 — v1.012 — Historical pre-stable release.
+13/08/2026 18:26 — v1.013 — Historical pre-stable release.
+13/08/2026 18:46 — v1.014 — Historical pre-stable release.
+13/08/2026 18:52 — v1.015 — Historical pre-stable release.
+13/08/2026 19:05 — v1.016 — Historical pre-stable release.
+13/08/2026 19:11 — v1.017 — Historical pre-stable release.
+13/08/2026 19:19 — v1.018 — Historical pre-stable release.
+13/08/2026 19:27 — v1.019 — Historical pre-stable release.
+13/08/2026 19:29 — v1.020 — Historical pre-stable release.
+13/08/2026 19:41 — v1.021 — Historical pre-stable release.
+13/08/2026 22:42 — v1.022 — Historical pre-stable release.
+13/08/2026 23:02 — v1.023 — Historical pre-stable release.
+13/08/2026 23:46 — v1.024 — Historical pre-stable release.
+13/08/2026 23:49 — v1.025 — Historical pre-stable release.
+14/08/2026 12:26 — v1.026 — Historical pre-stable release.
+14/08/2026 12:54 — v1.027 — Historical pre-stable release.
+14/08/2026 13:23 — v1.028 — Historical pre-stable release.
+14/08/2026 13:39 — v1.029 — Historical pre-stable release.
+14/08/2026 14:03 — v1.030 — Historical pre-stable release.
+14/08/2026 16:19 — v1.031 — Historical pre-stable release.
+14/08/2026 21:54 — v1.032 — Historical pre-stable release.
+14/08/2026 22:17 — v1.033 — Historical pre-stable release.
+14/08/2026 22:31 — v1.034 — Historical pre-stable release.
+15/08/2026 06:44 — v1.035 — Historical pre-stable release.
+15/08/2026 07:27 — v1.036 — Historical pre-stable release.
+15/08/2026 07:44 — v1.037 — Historical pre-stable release.
+15/08/2026 08:10 — v1.038 — Historical pre-stable release.
+15/08/2026 08:47 — v1.039 — Historical pre-stable release.
+15/08/2026 10:30 — v1.040 — Historical pre-stable release.
+15/08/2026 11:25 — v1.041 — Historical pre-stable release.
+15/08/2026 11:47 — v1.042 — Historical pre-stable release.
+15/08/2026 12:01 — v1.043 — Historical pre-stable release.
+15/08/2026 12:46 — v1.044 — Historical pre-stable release.
+15/08/2026 14:36 — v1.045 — Historical pre-stable release.
+15/08/2026 15:27 — v1.046 — Historical pre-stable release.
+15/08/2026 16:02 — v1.047 — Historical pre-stable release.
+16/08/2026 13:05 — v1.048 — Historical pre-stable release.
+16/08/2026 14:02 — v1.049 — Historical pre-stable release.
+20/08/2026 10:00 — v1.050 — Historical pre-stable release.
+20/08/2026 10:30 — v1.051 — Historical pre-stable release.
+20/08/2026 11:00 — v1.052 — Historical pre-stable release.
+20/08/2026 12:34 — v1.053 — Historical pre-stable release.
+20/08/2026 13:09 — v1.054 — Historical pre-stable release.
+20/08/2026 13:15 — v1.055 — Historical pre-stable release.
+20/08/2026 13:22 — v1.056 — Historical pre-stable release.
+20/08/2026 13:26 — v1.057 — Historical pre-stable release.
+20/08/2026 13:40 — v1.058 — Historical pre-stable release.
+20/08/2026 13:45 — v1.059 — Historical pre-stable release.
+20/08/2026 14:00 — v1.060 — Historical pre-stable release.
+20/08/2026 14:10 — v1.061 — Historical pre-stable release.
+20/08/2026 14:20 — v1.062 — Historical pre-stable release.
+20/08/2026 14:30 — v1.063 — Historical pre-stable release.
+20/08/2026 15:05 — v1.064 — Historical pre-stable release.
+20/08/2026 15:25 — v1.065 — Historical pre-stable release.
+20/08/2026 15:35 — v1.066 — Historical pre-stable release.
+20/08/2026 16:07 — v1.067 — Historical pre-stable release.
+20/08/2026 16:15 — v1.068 — Historical pre-stable release.
+20/08/2026 16:50 — v1.069 — Historical pre-stable release.
+20/08/2026 17:10 — v1.070 — Historical pre-stable release.
+20/08/2026 17:50 — v1.071 — Historical pre-stable release.
+20/08/2026 18:27 — v1.072 — Historical pre-stable release.
+20/08/2026 18:37 — v1.073 — Historical pre-stable release.
+20/08/2026 19:00 — v1.074 — Historical pre-stable release.
+20/08/2026 19:03 — v1.075 — Historical pre-stable release.
+20/08/2026 23:09 — v1.076 — Historical pre-stable release.
+21/08/2026 09:12 — v1.077 — Historical pre-stable release.
+21/08/2026 09:55 — v1.078 — Historical pre-stable release.
+21/08/2026 10:14 — v1.079 — Historical pre-stable release.
+21/08/2026 14:10 — v1.080 — Historical pre-stable release.
+21/08/2026 15:32 — v1.081 — Historical pre-stable release.
+21/08/2026 16:32 — v1.082 — Historical pre-stable release.
+21/08/2026 17:09 — v1.083 — Historical pre-stable release.
+21/08/2026 17:39 — v1.084 — Historical pre-stable release.
+21/08/2026 17:51 — v1.085 — Historical pre-stable release.
+21/08/2026 18:18 — v1.086 — Historical pre-stable release.
+21/08/2026 19:03 — v1.087 — Historical pre-stable release.
+21/08/2026 19:26 — v1.088 — Historical pre-stable release.
+21/08/2026 21:45 — v1.089 — Historical pre-stable release.
+21/08/2026 21:56 — v1.090 — Historical pre-stable release.
+21/08/2026 22:35 — v1.091 — Historical pre-stable release.
+21/08/2026 23:20 — v1.092 — Historical pre-stable release.
+22/08/2026 01:25 — v1.093 — Historical pre-stable release.
+22/08/2026 02:52 — v1.094 — Historical pre-stable release.
+22/08/2026 05:52 — v1.095 — Historical pre-stable release.
+22/08/2026 05:59 — v1.096 — Historical pre-stable release.
+22/08/2026 07:37 — v2.000 — Historical pre-stable development release.
+22/08/2026 09:50 — v2.001 — Historical pre-stable development release.
+22/08/2026 18:26 — v2.002 — Historical pre-stable development release.
+22/08/2026 19:00 — v2.003 — Historical pre-stable development release.
+22/08/2026 19:28 — v2.004 — Historical pre-stable development release.
+22/08/2026 22:59 — v2.005 — Historical pre-stable development release.
+22/08/2026 23:38 — v2.006 — Historical pre-stable development release.
+24/08/2026 10:39 — v2.007 — Historical pre-stable development release.
+24/08/2026 13:13 — v2.008 — Historical pre-stable development release.
+24/08/2026 13:54 — v2.009 — Historical pre-stable development release.
+24/08/2026 14:14 — v2.010 — Historical pre-stable development release.
+24/08/2026 14:54 — v2.011 — Historical pre-stable development release.
+24/08/2026 15:23 — v2.012 — Historical pre-stable development release.
+24/08/2026 15:44 — v2.013 — Historical pre-stable development release.
+24/08/2026 15:57 — v2.014 — Historical pre-stable development release.
+24/08/2026 16:12 — v2.015 — Historical pre-stable development release.
+24/08/2026 16:47 — v2.016 — Historical pre-stable development release.
+24/08/2026 17:00 — v2.017 — Historical pre-stable development release.
+24/08/2026 17:44 — v2.018 — Historical pre-stable development release.
+24/08/2026 18:13 — v2.019 — Historical pre-stable development release.
+24/08/2026 19:15 — v2.020 — Historical pre-stable development release.
+24/08/2026 19:30 — v2.021 — Historical pre-stable development release.
+24/08/2026 22:15 — v2.022 — Historical pre-stable development release.
+25/08/2026 00:30 — v2.023 — Historical pre-stable development release.
+25/08/2026 07:32 — v2.024 — Historical pre-stable development release.
+25/08/2026 08:26 — v2.025 — Historical pre-stable development release.
+25/08/2026 08:33 — v2.026 — Historical pre-stable development release.
+25/08/2026 08:50 — v2.027 — Historical pre-stable development release.
+25/08/2026 08:56 — v2.028 — Historical pre-stable development release.
+25/08/2026 09:06 — v2.029 — Historical pre-stable development release.
+25/08/2026 09:12 — v2.030 — Historical pre-stable development release.
+25/08/2026 09:36 — v2.031 — Historical pre-stable development release.
+25/08/2026 10:28 — v2.032 — Historical pre-stable development release.
+25/08/2026 10:45 — v2.033 — Historical pre-stable development release.
+25/08/2026 11:04 — v2.034 — Historical pre-stable development release.
+25/08/2026 12:03 — v2.035 — Historical pre-stable development release.
+25/08/2026 12:19 — v2.036 — Historical pre-stable development release.
+25/08/2026 12:35 — v2.037 — Historical pre-stable development release.
+25/08/2026 12:59 — v2.038 — Historical pre-stable development release.
+25/08/2026 13:17 — v2.039 — Historical pre-stable development release.
+25/08/2026 22:41 — v2.040 — Historical pre-stable development release.
+25/08/2026 23:04 — v2.041 — Historical pre-stable development release.
+25/08/2026 23:20 — v2.042 — Historical pre-stable development release.
+26/08/2026 00:10 — v2.043 — Historical pre-stable development release.
+26/08/2026 00:36 — v2.044 — Historical pre-stable development release.
+26/08/2026 08:30 — v2.045 — Historical pre-stable development release.
+26/08/2026 10:11 — v2.046 — Historical pre-stable development release.
+26/08/2026 10:44 — v2.047 — Historical pre-stable development release.
+26/08/2026 12:37 — v2.048 — Historical pre-stable development release.
+26/08/2026 12:46 — v2.049 — Historical pre-stable development release.
+26/08/2026 14:02 — v2.050 — Historical pre-stable development release.
+26/08/2026 14:22 — v2.051 — Historical pre-stable development release.
+26/08/2026 16:08 — v2.052 — Historical pre-stable development release.
+26/08/2026 18:11 — v2.053 — Historical pre-stable development release.
+26/08/2026 20:59 — v2.054 — Historical pre-stable development release.
+26/08/2026 21:38 — v2.055 — Historical pre-stable development release.
+26/08/2026 21:42 — v2.056 — Historical pre-stable development release.
+27/08/2026 05:43 — v2.057 — Historical pre-stable development release.
+27/08/2026 10:55 — v2.058 — Historical pre-stable development release.
+27/08/2026 11:38 — v2.059 — Historical pre-stable development release.
+27/08/2026 12:59 — v2.060 — Historical pre-stable development release.
+27/08/2026 13:17 — v2.061 — Historical pre-stable development release.
+27/08/2026 13:48 — v2.062 — Historical pre-stable development release.
+27/08/2026 14:08 — v2.063 — Historical pre-stable development release.
+27/08/2026 14:44 — v2.064 — Historical pre-stable development release.
+27/08/2026 15:17 — v2.065 — Historical pre-stable development release.
+27/08/2026 16:00 — v2.066 — Historical pre-stable development release.
+27/08/2026 16:04 — v2.067 — Historical pre-stable development release.
+27/08/2026 16:06 — v2.068 — Historical pre-stable development release.
+27/08/2026 16:45 — v2.069 — Historical pre-stable development release.
+27/08/2026 16:58 — v2.070 — Historical pre-stable development release.
+27/08/2026 17:03 — v2.071 — Historical pre-stable development release.
+27/08/2026 17:09 — v2.072 — Historical pre-stable development release.
+27/08/2026 17:42 — v1.000 — Established the stable v1 baseline with correct active-time accounting per application.
+27/08/2026 18:50 — v1.097 — Stabilized timeline limits and made expired history explicit.
+27/08/2026 20:04 — v1.098 — Unified limit notifications, personal email delivery, and per-section reset actions.
+27/08/2026 20:49 — v1.099 — Made local and remote limit synchronization reliable across all selected computers.
+28/08/2026 17:48 — v1.100 — Clarified quotas and time-window blocking, retained permanent daily windows, and restored the active blocking screen.
+28/08/2026 19:16 — v1.101 — Fixed time-window blocking, orange warnings, active status, today limits, and multi-computer classification.
+28/08/2026 21:16 — v1.102 — Added multiple whole-computer rules, exact unlocking, and custom rule names.
+28/08/2026 23:14 — v1.103 — Hid removed programs until their next run and aligned clients with the stable v1 baseline.
+29/08/2026 09:04 — v1.104 — Restored sessions crossing midnight, allowed permanent deletion of exclusions, and bundled the custom browser extension.
+30/08/2026 09:17 — v1.105 — Fixed multi-computer limits, archives and midnight sessions, unified notifications, and added Block and Warn actions.
+30/08/2026 11:26 — v1.106 — Added bounded incremental synchronization and reinforced multi-computer limits, midnight sessions, notifications, and actions.
+30/08/2026 13:37 — v1.107 — Unified both PWAs and reinforced multi-computer limits, midnight handling, analysis, deletion, and bounded aggregate synchronization.
+30/08/2026 16:54 — v1.108 — Clamped today-session timelines strictly to the displayed day.
+30/08/2026 17:28 — v1.109 — Improved computer presentation, separated total and daily duration, and normalized website labels.
+30/08/2026 17:39 — v1.110 — Displayed today duration only for sessions that began before today.
+30/08/2026 17:40 — v1.111 — Made today duration primary and displayed total duration in parentheses for multi-day sessions.
+30/08/2026 17:55 — v1.112 — Simplified timestamps and aligned multi-day durations in session lists and details.
+01/09/2026 21:06 — v1.113 — Simplified the Analysis, Today activity, and Classification interfaces.
+01/09/2026 21:15 — v1.114 — Made remote history resilient to invalid time slices.
+01/09/2026 21:27 — v1.115 — Aligned catalogue trace filters and session durations.
+01/09/2026 21:32 — v1.116 — Removed the unrelated trace filter from Classification.
+01/09/2026 21:40 — v1.117 — Streamlined selectors and exposed limit scope in rule details.
+01/09/2026 22:01 — v1.118 — Made selectors compact and aggregated notifications by person.
+01/09/2026 22:12 — v1.119 — Removed the redundant limitation-scope banner.
+02/09/2026 07:13 — v1.120 — Fixed sessions crossing midnight and made client packages compatible with integrated updates.
+02/09/2026 07:33 — v1.121 — Fixed narrow-screen layouts and exposed notification loading for the selected person.
+02/09/2026 08:54 — v1.122 — Removed temporary loading items and the obsolete-pages button from Analysis.
+03/09/2026 09:15 — v1.123 — Stabilized classification order and resynchronized the complete remote analysis history.
+03/09/2026 09:43 — v1.124 — Fixed the number of used days by combining detailed history with daily aggregates.
+03/09/2026 10:37 — v1.125 — Grouped uncategorized sites under Other sites and synchronized their detailed history without moving categorized sites.
+03/09/2026 10:43 — v1.126 — Restored historical domains and their daily totals under the virtual Other sites category.
+03/09/2026 10:50 — v1.127 — Prevented duplicate website classification and immediately completed current-day remote details under Other sites.
+03/09/2026 11:21 — v1.128 — Added permanent deletion of Other sites details and prevented deleted entries from reappearing.
+03/09/2026 12:41 — v1.129 — Fixed the Other sites timeline, removed synthetic sessions without losing totals, and retained old-client compatibility.
+03/09/2026 15:25 — v1.130 — Redesigned hierarchical limit creation and grouping.
+03/09/2026 20:10 — v1.131 — Made Analysis compact and consolidated the limit editor into one dialog.
+03/09/2026 20:28 — v1.132 — Placed the compact limit editor in one column and replaced controls with selection lists.

@@ -5,6 +5,8 @@ import locale
 import os
 from pathlib import Path
 
+from runtime_profile import current_profile
+
 
 DOMAIN = "usage-guard"
 LOCALE_DIR = Path(__file__).with_name("locales")
@@ -15,8 +17,7 @@ def settings_path():
     overridden = os.environ.get("USAGE_GUARD_SETTINGS_PATH")
     if overridden:
         return Path(overridden)
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "Usage Guard" / "settings.json"
+    return current_profile().local_data_directory() / "settings.json"
 
 
 def language_preference(default="auto"):

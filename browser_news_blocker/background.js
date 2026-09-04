@@ -44,7 +44,7 @@ async function notifyForNewsSite(tabId, url) {
     type: "basic",
     iconUrl: "icon.svg",
     title: "Usage Guard",
-    message: `Attention à ne pas passer trop de temps sur ${hostname}.`,
+    message: `Be mindful of how much time you spend on ${hostname}.`,
     priority: 1,
   });
 }

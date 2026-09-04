@@ -21,6 +21,7 @@ VERSION_PATTERN = re.compile(r"^\d+\.\d{3}$")
 CACHE_PATTERN = re.compile(r"usage-guard-shell-v[0-9-]+")
 ASSET_PATTERN = re.compile(r'(?P<asset>(?:style\.css|i18n\.js|app\.js)\?v=)[^"\]]+')
 REGISTRATION_PATTERN = re.compile(r'(?P<asset>service-worker\.js\?v=)[^"\]]+')
+STABLE_BASELINE_VERSION = "1.000"
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,14 @@ def next_version(version: str) -> str:
     return f"{major}.{revision + 1:03d}"
 
 
+def next_available_version(version: str, known_versions) -> str:
+    candidate = next_version(version)
+    known = set(known_versions)
+    while candidate in known:
+        candidate = next_version(candidate)
+    return candidate
+
+
 def normalize_changes(changes: str | None) -> str:
     value = re.sub(r"[\r\n]+", " ", str(changes or "")).strip()
     if not value:
@@ -76,6 +85,7 @@ def plan_release(
     requested_version: str | None = None,
     deployed_version: str | None = None,
     republish: bool = False,
+    stable_reset: bool = False,
 ) -> ReleasePlan:
     known = entries(changelog)
     if not known:
@@ -86,14 +96,33 @@ def plan_release(
         raise ValueError(f"La version déployée v{current} est absente de CHANGELOG.md.")
 
     if republish:
-        if changes or requested_version:
+        if changes or requested_version or stable_reset:
             raise ValueError("La republication n’accepte ni -Changes ni -Version.")
         return ReleasePlan(current, None, False)
 
     description = normalize_changes(changes)
-    target = requested_version or next_version(current)
+    if requested_version:
+        target = requested_version
+    elif stable_reset:
+        target = STABLE_BASELINE_VERSION
+    else:
+        immediate = next_version(current)
+        resumable = versions.get(immediate)
+        target = immediate if (
+            resumable
+            and immediate == known[-1].version
+            and resumable.changes == description
+        ) else next_available_version(current, versions)
     if not VERSION_PATTERN.fullmatch(target):
         raise ValueError(f"Version invalide : {target}")
+    if stable_reset and (
+        target != STABLE_BASELINE_VERSION
+        or int(current.split(".")[0]) < 2
+    ):
+        raise ValueError(
+            "La réinitialisation stable est réservée au passage exceptionnel "
+            "d’une préversion 2.xxx vers v1.000."
+        )
     if target == current:
         raise ValueError(f"La version v{target} est déjà déployée.")
 
@@ -102,7 +131,11 @@ def plan_release(
         if target != known[-1].version or existing.changes != description:
             raise ValueError(f"La version v{target} existe déjà avec un autre contenu.")
         return ReleasePlan(target, description, False)
-    if requested_version and tuple(map(int, target.split("."))) <= tuple(map(int, current.split("."))):
+    if (
+        requested_version
+        and tuple(map(int, target.split("."))) <= tuple(map(int, current.split(".")))
+        and not stable_reset
+    ):
         raise ValueError("La nouvelle version doit être supérieure à la version déployée.")
     return ReleasePlan(target, description, True)
 
@@ -181,6 +214,7 @@ def main() -> int:
     parser.add_argument("--version")
     parser.add_argument("--deployed-version")
     parser.add_argument("--republish", action="store_true")
+    parser.add_argument("--stable-reset", action="store_true")
     arguments = parser.parse_args()
     if arguments.mode == "prepare" and not all(
         (arguments.index, arguments.app, arguments.service_worker)
@@ -194,6 +228,7 @@ def main() -> int:
             requested_version=arguments.version,
             deployed_version=arguments.deployed_version,
             republish=arguments.republish,
+            stable_reset=arguments.stable_reset,
         )
         entry = None
         if arguments.mode == "prepare":

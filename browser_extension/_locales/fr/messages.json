@@ -13,5 +13,56 @@
   },
   "getExtension": {
     "message": "Obtenir une rallonge exceptionnelle de $1"
+  },
+  "optionsTitle": {
+    "message": "Usage Guard · Bandeau"
+  },
+  "optionsHeading": {
+    "message": "Bandeau Usage Guard"
+  },
+  "optionsDescription": {
+    "message": "Ces réglages modifient le rappel avant blocage. Une fois la limite atteinte, le bandeau et le joker restent visibles."
+  },
+  "displayLabel": {
+    "message": "Affichage"
+  },
+  "displayWarning": {
+    "message": "Uniquement à l’approche de la limite"
+  },
+  "displayPeriodic": {
+    "message": "Rappel périodique"
+  },
+  "displayAlways": {
+    "message": "Toujours visible"
+  },
+  "displayHidden": {
+    "message": "Masqué avant le blocage"
+  },
+  "positionLabel": {
+    "message": "Position"
+  },
+  "positionTop": {
+    "message": "Bande en haut"
+  },
+  "positionBottom": {
+    "message": "Bande en bas"
+  },
+  "opacityLabel": {
+    "message": "Opacité du fond"
+  },
+  "opacityValue": {
+    "message": "$1 % opaque"
+  },
+  "warningSecondsLabel": {
+    "message": "Préavis (secondes)"
+  },
+  "periodicEveryLabel": {
+    "message": "Rappel toutes les (secondes)"
+  },
+  "periodicDurationLabel": {
+    "message": "Durée du rappel (secondes)"
+  },
+  "settingsSaved": {
+    "message": "Réglages enregistrés."
   }
 }

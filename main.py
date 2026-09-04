@@ -6,6 +6,13 @@ import os
 from pathlib import Path
 from ctypes import wintypes
 
+from runtime_profile import configure_from_argv
+
+
+# Select and consume --profile before Qt and the application modules inspect
+# command-line arguments or initialize profile-dependent global objects.
+runtime_profile = configure_from_argv()
+
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
@@ -17,6 +24,9 @@ from backend_client import BackendClient
 from usage_guard import APP_NAME, config, configure_windows_autostart, debug_log
 from windows_notifications import register_notification_identity
 from i18n import configure as configure_language, language_preference
+from decision_service import DecisionServiceManager
+from service_backend_bridge import ServiceBackendBridge
+from windows_power_events import WindowsPowerEventFilter, WindowsShellEventFilter
 
 
 # Keep this handle alive for the lifetime of the process.  Windows releases
@@ -26,7 +36,7 @@ _create_mutex = _kernel32.CreateMutexW
 _create_mutex.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
 _create_mutex.restype = wintypes.HANDLE
 
-_instance_mutex = _create_mutex(None, False, "Local\\UsageGuardSingleInstance")
+_instance_mutex = _create_mutex(None, False, runtime_profile.mutex_name)
 _instance_error = ctypes.get_last_error()
 if not _instance_mutex:
     raise ctypes.WinError(_instance_error)
@@ -40,6 +50,8 @@ if _instance_error == ERROR_ALREADY_EXISTS:
 configure_language(language_preference(getattr(config, "LANGUAGE", "auto")))
 app = QApplication(sys.argv)
 app.setApplicationName(APP_NAME)
+if not runtime_profile.production:
+    app.setApplicationDisplayName(f"{APP_NAME} · {runtime_profile.name.upper()}")
 app.setQuitOnLastWindowClosed(False)
 # Set the same icon as the notification area before any service creates a
 # top-level window (notably the limit overlay/taskbar replacement).
@@ -56,16 +68,38 @@ if bool(getattr(config, "ACTIVITYWATCH_ENABLED", False)):
 browser_bridge.start()
 app.aboutToQuit.connect(browser_bridge.stop)
 
-tray_source = TrayControlSource()
+decision_service = None
+if runtime_profile.production:
+    # The v2 production desktop is only valid with the protected SCM service.
+    decision_service = DecisionServiceManager(
+        runtime_profile, service_detector=lambda _profile: True
+    )
+    decision_service.start()
+else:
+    decision_service = DecisionServiceManager(runtime_profile)
+    decision_service.start()
+
+tray_source = TrayControlSource(decision_mirror=decision_service)
 tray_source.start()
+power_event_filter = WindowsPowerEventFilter(tray_source.service.record_runtime_event)
+app.installNativeEventFilter(power_event_filter)
+shell_event_filter = WindowsShellEventFilter(tray_source.reregister_tray)
+app.installNativeEventFilter(shell_event_filter)
+service_backend_bridge = None
+if decision_service is not None and decision_service.external_service:
+    service_backend_bridge = ServiceBackendBridge(
+        decision_service, tray_source.service, logger=debug_log
+    )
+    service_backend_bridge.start()
+    app.aboutToQuit.connect(service_backend_bridge.stop)
 backend_client = BackendClient(
-        tray_source.service.request_remote_snapshot,
-        tray_source.service.request_remote_command,
-        activity_provider=tray_source.service.request_activity_store,
-        activity_importer=tray_source.service.import_activity_store,
+    tray_source.service.request_remote_snapshot,
+    tray_source.service.request_remote_command,
 )
 tray_source.service.email_notification_requested.connect(
-    lambda title, message, recipient: backend_client.queue_email_notification(title, message, recipient)
+    lambda kind, title, message, recipient: backend_client.queue_email_notification(
+        title, message, recipient, kind
+    )
 )
 remote_server = None
 if bool(getattr(config, "REMOTE_API_ENABLED", True)):
@@ -73,17 +107,34 @@ if bool(getattr(config, "REMOTE_API_ENABLED", True)):
         tray_source.service.request_remote_snapshot,
         tray_source.service.request_remote_command,
         backend_client,
+        admin_authenticator=(
+            decision_service.authenticate_pwa_user
+            if decision_service is not None and decision_service.external_service
+            else backend_client.authenticate_user
+        ),
+        backend_manager=(
+            decision_service
+            if decision_service is not None and decision_service.external_service
+            else backend_client
+        ),
+        windows_session_authenticator=(
+            tray_source.service.windows_session_user
+            if decision_service is not None and decision_service.external_service
+            else None
+        ),
     )
     remote_server.start()
     app.aboutToQuit.connect(remote_server.stop)
 
-backend_client.start()
+if service_backend_bridge is None:
+    backend_client.start()
 app.aboutToQuit.connect(backend_client.stop)
 debug_log("tray icon creation scheduled")
 app.aboutToQuit.connect(tray_source.stop)
+if decision_service is not None:
+    app.aboutToQuit.connect(decision_service.stop)
 ready_path = (
-    Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    / APP_NAME
+    runtime_profile.local_data_directory()
     / "ready.pid"
 )
 def mark_tray_ready():
@@ -122,6 +173,9 @@ threading.Thread(
     daemon=True,
 ).start()
 
-configure_windows_autostart(bool(getattr(config, "AUTOSTART_WITH_WINDOWS", True)))
+if runtime_profile.allow_autostart_changes:
+    configure_windows_autostart(
+        bool(getattr(config, "AUTOSTART_WITH_WINDOWS", True))
+    )
 
 sys.exit(app.exec())

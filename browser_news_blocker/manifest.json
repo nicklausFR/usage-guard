@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Usage Guard — Blocage actualités",
+  "name": "Usage Guard — News limiter",
   "version": "1.0.0",
-  "description": "Avertit lors de la visite de sites d'actualité.",
+  "description": "Warns when visiting configured news websites.",
   "permissions": ["notifications", "storage", "tabs"],
   "host_permissions": ["<all_urls>"],
   "background": {"service_worker": "background.js"},

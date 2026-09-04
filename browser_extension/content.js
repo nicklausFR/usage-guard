@@ -2,6 +2,21 @@ let limitUi = null;
 let mediaBlockTimer = null;
 let mediaToResume = new Set();
 let resumeMediaAfterBlock = false;
+let periodicCycleStartedAt = Date.now();
+const defaultBannerSettings = {
+  mode: "warning", opacity: 62, position: "top",
+  warningSeconds: 300, periodicEverySeconds: 300,
+  periodicVisibleSeconds: 15
+};
+let bannerSettings = {...defaultBannerSettings};
+
+function warningOnly(state) {
+  return state?.enforcement_action === "warn";
+}
+
+function blocksMedia(state) {
+  return Boolean(state) && !warningOnly(state) && Number(state.remaining) <= 0;
+}
 
 function tr(key, substitutions) {
   return chrome.i18n.getMessage(key, substitutions) || key;
@@ -46,7 +61,7 @@ function setMediaBlocked(blocked) {
 }
 
 document.addEventListener("play", (event) => {
-  if (limitUi?.state && Number(limitUi.state.remaining) <= 0) {
+  if (blocksMedia(limitUi?.state)) {
     try {
       mediaToResume.add(event.target);
       resumeMediaAfterBlock = true;
@@ -66,6 +81,12 @@ function bridgeMessage(message, fallback = {}) {
   }
 }
 
+function pageMediaPlaying() {
+  return [...document.querySelectorAll("video, audio")].some((media) => (
+    !media.paused && !media.ended && media.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA
+  ));
+}
+
 function formatDuration(value) {
   const seconds = Math.max(0, Math.ceil(Number(value) || 0));
   const hours = Math.floor(seconds / 3600);
@@ -73,6 +94,13 @@ function formatDuration(value) {
   const rest = seconds % 60;
   if (hours) return `${hours} h ${String(minutes).padStart(2, "0")} min ${String(rest).padStart(2, "0")} s`;
   return minutes ? `${minutes} min ${String(rest).padStart(2, "0")} s` : `${rest} s`;
+}
+
+function formatConfiguredDuration(value, unit) {
+  const seconds = Math.max(0, Math.round(Number(value) || 0));
+  if (unit === "hours") return `${Number((seconds / 3600).toFixed(2))} h`;
+  if (unit === "minutes") return `${Number((seconds / 60).toFixed(2))} min`;
+  return formatDuration(seconds);
 }
 
 function ensureLimitUi() {
@@ -128,6 +156,28 @@ function ensureLimitUi() {
   return limitUi;
 }
 
+function applyBannerSettings(ui, state) {
+  const opacity = Math.min(100, Math.max(15, Number(bannerSettings.opacity) || 62)) / 100;
+  const bottom = bannerSettings.position === "bottom";
+  ui.banner.style.top = bottom ? "auto" : "0";
+  ui.banner.style.bottom = bottom ? "0" : "auto";
+  ui.banner.style.background = `rgba(100,18,24,${opacity})`;
+  ui.overlay.style.top = bottom ? "0" : "48px";
+  ui.overlay.style.bottom = bottom ? "48px" : "0";
+  if (!state) return false;
+  const remaining = Math.max(0, Number(state.remaining) || 0);
+  const reached = remaining <= 0;
+  if (reached || bannerSettings.mode === "always") return true;
+  if (bannerSettings.mode === "hidden") return false;
+  if (bannerSettings.mode === "warning") {
+    return remaining <= Math.max(1, Number(bannerSettings.warningSeconds) || 300);
+  }
+  const every = Math.max(30, Number(bannerSettings.periodicEverySeconds) || 300);
+  const visible = Math.min(every, Math.max(3, Number(bannerSettings.periodicVisibleSeconds) || 15));
+  const elapsed = Math.max(0, (Date.now() - periodicCycleStartedAt) / 1000);
+  return elapsed % every < visible;
+}
+
 function renderLimit(state) {
   const ui = ensureLimitUi();
   ui.state = state;
@@ -139,21 +189,48 @@ function renderLimit(state) {
   }
   const allowed = Math.max(1, Number(state.allowed) || 1);
   const remaining = Math.max(0, Number(state.remaining) || 0);
-  const blocked = remaining <= 0;
+  const reached = remaining <= 0;
+  const blocked = blocksMedia(state);
   setMediaBlocked(blocked);
-  ui.banner.style.display = "flex";
-  ui.label.textContent = blocked ? `${state.label} — ${tr("timeElapsed")}` : state.label;
+  ui.banner.style.display = applyBannerSettings(ui, state) ? "flex" : "none";
+  ui.label.textContent = reached ? `${state.label} — ${tr("timeElapsed")}` : state.label;
   ui.countdown.textContent = formatDuration(remaining);
   ui.fill.style.width = `${Math.min(100, 100 * (Number(state.seconds) || 0) / allowed)}%`;
   ui.overlay.style.display = blocked ? "block" : "none";
   ui.bonus.disabled = false;
-  ui.bonus.textContent = tr("getExtension", formatDuration(state.extension_seconds));
+  ui.bonus.textContent = tr(
+    "getExtension",
+    formatConfiguredDuration(state.extension_seconds, state.extension_unit)
+  );
   ui.bonus.style.display = blocked && !state.extension_used && Number(state.extension_seconds) > 0 ? "inline-block" : "none";
 }
 
+chrome.storage?.sync?.get(defaultBannerSettings).then((settings) => {
+  bannerSettings = {...defaultBannerSettings, ...settings};
+  periodicCycleStartedAt = Date.now();
+  if (limitUi) renderLimit(limitUi.state);
+}).catch(() => {});
+chrome.storage?.onChanged?.addListener((changes, area) => {
+  if (area !== "sync") return;
+  let bannerTimingChanged = false;
+  for (const key of Object.keys(defaultBannerSettings)) {
+    if (changes[key]) {
+      bannerSettings[key] = changes[key].newValue;
+      bannerTimingChanged = bannerTimingChanged || [
+        "mode", "periodicEverySeconds", "periodicVisibleSeconds"
+      ].includes(key);
+    }
+  }
+  if (bannerTimingChanged) periodicCycleStartedAt = Date.now();
+  if (limitUi) renderLimit(limitUi.state);
+});
+
 function notifyUsageGuard() {
   if (!document.hidden) {
-    bridgeMessage({type: "usage-guard-active-tab"});
+    bridgeMessage({
+      type: "usage-guard-active-tab",
+      playing: pageMediaPlaying()
+    });
   }
 }
 
@@ -163,5 +240,8 @@ chrome.runtime.onMessage.addListener((message) => {
 
 document.addEventListener("visibilitychange", notifyUsageGuard);
 window.addEventListener("focus", notifyUsageGuard);
+for (const eventName of ["play", "pause", "ended", "emptied"]) {
+  document.addEventListener(eventName, notifyUsageGuard, true);
+}
 setInterval(notifyUsageGuard, 1000);
 notifyUsageGuard();

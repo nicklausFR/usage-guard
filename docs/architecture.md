@@ -2,13 +2,18 @@
 
 ## Status
 
-Approved direction. This document guides future implementation work and architectural decisions.
+Implementation reference. The Windows service, authenticated local IPC,
+protected production storage, runtime profiles, and server-managed policy
+ownership are implemented. Managed browser deployment and Native Messaging
+remain future hardening work.
 
 ## Goal
 
 Make Usage Guard meaningfully difficult for a standard Windows user to bypass, without claiming protection against a local administrator or rewriting the existing application.
 
-The intended deployment has one monitored computer, one restricted user, and a small number of authorized remote users. The design should remain proportionate to that scope.
+The intended deployment has a small number of monitored computers, restricted
+users, and authorized administrators. The design should remain proportionate
+to that scope.
 
 ## Overview
 
@@ -73,7 +78,7 @@ The local PWA may read state. Operations that reduce protection are reserved for
 
 ## Local communication
 
-The target is a small Windows IPC surface, preferably a named pipe with explicit ACLs.
+The application uses a small Windows named-pipe IPC surface with explicit ACLs.
 
 The versioned protocol separates:
 
@@ -82,7 +87,8 @@ The versioned protocol separates:
 - decisions returned by the service;
 - administrative commands unavailable to the restricted account.
 
-The existing local HTTP API may remain during migration, but it must not expose commands that reduce protection.
+The local HTTP API serves the PWA but does not provide an unauthenticated path
+for reducing protected policies.
 
 ## Browser extension
 
@@ -122,6 +128,49 @@ Unit tests use a simulated clock, temporary storage, and fake adapters. Only a s
 Development and production remain isolated through separate instance names, IPC endpoints, data directories, and extension identifiers. A development instance cannot modify production service state.
 
 Production protection may remain active during normal development. An explicit, logged maintenance window should cover installations or tests that require stopping the service.
+
+### Runtime profiles
+
+The application provides three explicit runtime profiles:
+
+- `production` is the default and preserves the v1 data directory, ports,
+  mutex, backend connection, and Windows autostart behavior;
+- `dev` uses a separate mutex, ports `18765` and `18766`, and the
+  `%LOCALAPPDATA%\Usage Guard Dev` directory. Backend synchronization and
+  Windows autostart changes are forcibly disabled;
+- `test` reserves ephemeral ports and isolated storage for automated tests.
+
+The development profile is started with:
+
+```powershell
+python main.py --profile dev
+```
+
+The production profile requires the protected SCM service. The development
+profile starts an isolated child decision process by default and can optionally
+use the separately installed `UsageGuardDecisionDev` service. Command
+provenance is stamped by the transport adapter, never trusted from received
+JSON. Backend-managed controls cannot be weakened through the local desktop or
+PWA interfaces.
+
+The production profile remains the default:
+
+```powershell
+python main.py
+```
+
+The production browser extension keeps targeting port `8765`. A generated,
+separately identified development extension targets port `18765` and can be
+loaded alongside it without modifying the production source extension. See
+`docs/v2-testing.md` for the repeatable test procedure.
+
+### Safe rollout and rollback
+
+Server changes remain additive and backward compatible with `/api/v1`.
+Breaking contracts require a new API version while supported endpoints remain
+available. Only one production agent for a device may poll and acknowledge
+commands at a time. Client updates retain a previous executable and service
+runtime for rollback when staging or health verification fails.
 
 ## Threat model
 

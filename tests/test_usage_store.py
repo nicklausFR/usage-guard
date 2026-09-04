@@ -1,9 +1,12 @@
 import json
+import sqlite3
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -13,20 +16,791 @@ from app_limiter import AppLimiter
 
 
 class AppUsageStoreBackupTest(unittest.TestCase):
-    def test_existing_activity_file_gets_daily_backup(self):
+    def test_validated_sqlite_migration_keeps_legacy_json_immutable(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "activity.json"
-            original = {"version": 2, "days": {"2026-08-12": {"app:test": 42}}}
+            original = json.dumps({
+                "version": 2,
+                "days": {"2026-08-01": {"app:legacy": 42.0}},
+                "targets": {"app:legacy": {"label": "Legacy"}},
+            }, ensure_ascii=False, indent=2).encode("utf-8")
+            path.write_bytes(original)
+
+            store = AppUsageStore(path)
+            store.add_seconds(
+                type("Target", (), {
+                    "key": "app:new", "label": "New",
+                    "category": "", "detail_host": "",
+                })(),
+                15, when=date(2026, 8, 30),
+            )
+            store.save()
+
+            self.assertEqual(path.read_bytes(), original)
+            self.assertTrue(store.activity_database_path.exists())
+            reloaded = AppUsageStore(path)
+            self.assertEqual(
+                reloaded.data["days"]["2026-08-01"]["app:legacy"], 42.0,
+            )
+            self.assertEqual(
+                reloaded.data["days"]["2026-08-30"]["app:new"], 15.0,
+            )
+
+    def test_failed_sqlite_validation_never_modifies_the_legacy_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            original = b'{"version":2,"days":{"2026-08-01":{"app:x":1}}}'
+            path.write_bytes(original)
+
+            with patch(
+                "local_activity_sqlite.LocalActivitySqlite.import_legacy",
+                side_effect=RuntimeError("validation failed"),
+            ), self.assertRaisesRegex(RuntimeError, "validation failed"):
+                AppUsageStore(path)
+
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_current_day_save_never_serializes_older_history(self):
+        class HistoryMustNotBeRead(dict):
+            def items(self):
+                raise AssertionError("historical day was serialized")
+
+            def __iter__(self):
+                raise AssertionError("historical day was iterated")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            # Inject a sentinel after the validated migration. A current-day
+            # row update must not inspect or copy this unrelated old payload.
+            store.data["days"]["1900-01-01"] = HistoryMustNotBeRead({
+                "app:archive": 500_000_000,
+            })
+            store.add_seconds(
+                type("Target", (), {
+                    "key": "app:today", "label": "Today",
+                    "category": "", "detail_host": "",
+                })(),
+                3, when=date(2026, 8, 30),
+            )
+
+            store.save()
+
+            self.assertEqual(
+                AppUsageStore(store.path).data["days"]["2026-08-30"][
+                    "app:today"
+                ],
+                3.0,
+            )
+
+    def test_daily_aggregate_export_is_bounded_and_ack_is_revision_safe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            target = type("Target", (), {
+                "key": "app:kona", "label": "Kona",
+                "category": "Jeux", "detail_host": "",
+            })()
+            store.add_seconds(target, 60, when=date(2026, 8, 29))
+            store.save()
+            first = store._activity_sqlite.pending_daily_aggregates()
+
+            self.assertEqual(len(first), 1)
+            self.assertEqual(first[0]["local_day"], "2026-08-29")
+            self.assertEqual(first[0]["metrics"], [{
+                "kind": "usage", "key": "app:kona", "seconds": 60.0,
+            }])
+            self.assertNotIn("sessions", first[0])
+            old_id = first[0]["aggregate_id"]
+
+            store.add_seconds(target, 30, when=date(2026, 8, 29))
+            store.save()
+            current = store._activity_sqlite.pending_daily_aggregates()
+            self.assertNotEqual(current[0]["aggregate_id"], old_id)
+            store._activity_sqlite.acknowledge_daily_aggregates([old_id])
+            self.assertEqual(store._activity_sqlite.pending_daily_count(), 1)
+            store._activity_sqlite.acknowledge_daily_aggregates([
+                current[0]["aggregate_id"],
+            ])
+            self.assertEqual(store._activity_sqlite.pending_daily_count(), 0)
+
+    def test_current_day_is_never_exported_and_yesterday_is_stable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            target = type("Target", (), {
+                "key": "app:kona", "label": "Kona",
+                "category": "Jeux", "detail_host": "",
+            })()
+            today = date.today()
+            yesterday = today - timedelta(days=1)
+
+            store.add_seconds(target, 10, when=today)
+            store.save()
+            store.add_seconds(target, 20, when=today)
+            store.save()
+            self.assertEqual(
+                store._activity_sqlite.pending_daily_aggregates(), [],
+            )
+
+            store.add_seconds(target, 60, when=yesterday)
+            store.save()
+            pending = store._activity_sqlite.pending_daily_aggregates()
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["local_day"], yesterday.isoformat())
+            aggregate_id = pending[0]["aggregate_id"]
+            store.add_seconds(target, 5, when=today)
+            store.save()
+            self.assertEqual(
+                store._activity_sqlite.pending_daily_aggregates()[0][
+                    "aggregate_id"
+                ],
+                aggregate_id,
+            )
+
+    def test_daily_aggregate_exports_other_site_detail_without_recounting_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            yesterday_date = date.today() - timedelta(days=1)
+            target = type("Target", (), {
+                "key": "site:brave.exe:other-sites", "label": "Autres sites",
+                "category": "Navigation Internet", "detail_host": "amazon.fr",
+            })()
+            store.add_seconds(target, 55, when=yesterday_date)
+            target.detail_host = "just4camper.fr"
+            store.add_seconds(target, 35, when=yesterday_date)
+            store.save()
+
+            metrics = store._activity_sqlite.pending_daily_aggregates()[0][
+                "metrics"
+            ]
+            self.assertEqual(metrics, [
+                {
+                    "kind": "other_site",
+                    "key": "site:brave.exe:amazon.fr",
+                    "seconds": 55.0,
+                },
+                {
+                    "kind": "other_site",
+                    "key": "site:brave.exe:just4camper.fr",
+                    "seconds": 35.0,
+                },
+                {
+                    "kind": "usage",
+                    "key": "site:brave.exe:other-sites",
+                    "seconds": 90.0,
+                },
+            ])
+
+    def test_other_site_export_format_upgrade_requeues_all_closed_days(self):
+        from local_activity_sqlite import LocalActivitySqlite
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            yesterday_date = date.today() - timedelta(days=1)
+            target = type("Target", (), {
+                "key": "site:brave.exe:other-sites", "label": "Autres sites",
+                "category": "Navigation Internet", "detail_host": "amazon.fr",
+            })()
+            store.add_seconds(target, 55, when=yesterday_date)
+            store.save()
+            aggregate = store._activity_sqlite.pending_daily_aggregates()[0]
+            store._activity_sqlite.acknowledge_daily_aggregates([
+                aggregate["aggregate_id"],
+            ])
+            db = sqlite3.connect(store.activity_database_path)
+            try:
+                payload = json.loads(db.execute(
+                    "SELECT payload FROM daily_aggregate_export"
+                ).fetchone()[0])
+                payload["metrics"] = [
+                    item for item in payload["metrics"]
+                    if item["kind"] != "other_site"
+                ]
+                db.execute(
+                    "UPDATE daily_aggregate_export SET payload=?,bridge_acked=1",
+                    (json.dumps(payload, sort_keys=True, separators=(",", ":")),),
+                )
+                db.execute(
+                    "UPDATE activity_meta SET value='1' "
+                    "WHERE key='daily_export_format_version'"
+                )
+                db.commit()
+            finally:
+                db.close()
+
+            upgraded = LocalActivitySqlite(store.activity_database_path)
+            pending = upgraded.pending_daily_aggregates()
+
+            self.assertEqual(len(pending), 1)
+            self.assertIn({
+                "kind": "other_site",
+                "key": "site:brave.exe:amazon.fr", "seconds": 55.0,
+            }, pending[0]["metrics"])
+
+    def test_legacy_site_migration_keeps_each_domain_on_its_source_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["days"] = {
+                "2026-08-01": {"site:brave.exe:amazon.fr": 10.0},
+                "2026-08-02": {"site:brave.exe:bbc.com": 20.0},
+            }
+            store.data["targets"].update({
+                "site:brave.exe:amazon.fr": {"label": "amazon.fr"},
+                "site:brave.exe:bbc.com": {"label": "bbc.com"},
+            })
+
+            store._migrate_legacy_targets()
+
+            self.assertEqual(
+                store.data["other_site_days"]["brave.exe"]["2026-08-01"],
+                {"amazon.fr": 10.0},
+            )
+            self.assertEqual(
+                store.data["other_site_days"]["brave.exe"]["2026-08-02"],
+                {"bbc.com": 20.0},
+            )
+
+    def test_owner_scoped_ack_upgrade_requeues_compact_summaries_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            target = type("Target", (), {
+                "key": "app:kona", "label": "Kona",
+                "category": "Jeux", "detail_host": "",
+            })()
+            yesterday = date.today() - timedelta(days=1)
+            store.add_seconds(target, 60, when=yesterday)
+            store.save()
+            aggregate = store._activity_sqlite.pending_daily_aggregates()[0]
+            store.acknowledge_backend_daily_aggregates([
+                aggregate["aggregate_id"],
+            ])
+            self.assertEqual(
+                store._activity_sqlite.pending_daily_count(), 0,
+            )
+
+            db = sqlite3.connect(store.activity_database_path)
+            try:
+                db.execute(
+                    "UPDATE activity_meta SET value='1' WHERE "
+                    "key='daily_export_owner_scope_version'"
+                )
+                db.commit()
+            finally:
+                db.close()
+
+            restored = AppUsageStore(path)
+            pending = restored.pending_backend_daily_aggregates()
+            self.assertEqual(
+                [item["aggregate_id"] for item in pending],
+                [aggregate["aggregate_id"]],
+            )
+            restored.acknowledge_backend_daily_aggregates([
+                aggregate["aggregate_id"],
+            ])
+            again = AppUsageStore(path)
+            self.assertEqual(again.pending_backend_daily_aggregates(), [])
+
+    def test_existing_activity_file_gets_bounded_metadata_backup_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            original = {
+                "version": 2,
+                "days": {"2026-08-12": {"app:test": 42}},
+                "sessions": [{"archive": "x" * (3 * 1024 * 1024)}],
+                "targets": {
+                    "app:test": {"label": "Test", "category": "Travail"},
+                },
+                "category_order": ["Travail"],
+                "app_limit_settings": {
+                    "app:test": {"limit_seconds": 300},
+                },
+            }
             path.write_text(json.dumps(original), encoding="utf-8")
 
             AppUsageStore(path)
 
-            backup = path.parent / "backups" / f"activity-{date.today().isoformat()}.json"
+            backup = (
+                path.parent / "backups"
+                / f"activity-metadata-{date.today().isoformat()}.json"
+            )
             self.assertTrue(backup.exists())
-            self.assertEqual(json.loads(backup.read_text(encoding="utf-8")), original)
+            self.assertLessEqual(backup.stat().st_size, 2 * 1024 * 1024)
+            saved = json.loads(backup.read_text(encoding="utf-8"))
+            self.assertEqual(saved["kind"], "usage-guard-metadata-backup")
+            self.assertNotIn("days", saved["configuration"])
+            self.assertNotIn("sessions", saved["configuration"])
+            self.assertEqual(
+                saved["configuration"]["targets"]["app:test"]["category"],
+                "Travail",
+            )
+            self.assertEqual(
+                saved["configuration"]["app_limit_settings"]["app:test"][
+                    "limit_seconds"
+                ],
+                300,
+            )
+
+    def test_metadata_backups_are_rotated_to_seven_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            path.write_text(
+                json.dumps({"version": 2, "days": {}}), encoding="utf-8",
+            )
+            backup_directory = path.parent / "backups"
+            backup_directory.mkdir()
+            for day in range(1, 10):
+                (backup_directory / f"activity-metadata-2026-01-{day:02d}.json").write_text(
+                    "{}", encoding="utf-8",
+                )
+
+            AppUsageStore(path)
+
+            backups = list(backup_directory.glob("activity-metadata-*.json"))
+            self.assertEqual(len(backups), 7)
+
+
+class ClassificationCatalogTest(unittest.TestCase):
+    def test_dismissed_program_waits_for_close_then_a_real_relaunch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            store.data["days"] = {"2026-08-28": {"app:test": 42}}
+            store.data["targets"] = {
+                "app:test": {"label": "Test", "category": "Travail"},
+            }
+            store.data["app_limit_settings"] = {
+                "app:test": {"limit_seconds": 300},
+            }
+            store.update_sessions({"program:test": {
+                "kind": "program", "key": "app:test", "label": "Test",
+            }}, at="2026-08-28T10:00:00+02:00")
+
+            store.dismiss_target("app:test")
+
+            self.assertEqual(store.data["dismissed_targets"]["app:test"], "running")
+            store.observe_program_inventory(["app:test"])
+            self.assertTrue(store.is_target_dismissed("app:test"))
+            store.observe_program_inventory([])
+            self.assertEqual(
+                store.data["dismissed_targets"]["app:test"], "awaiting_launch",
+            )
+            store.observe_program_inventory([])
+            self.assertTrue(store.is_target_dismissed("app:test"))
+            store.observe_program_inventory(["app:test"])
+
+            self.assertFalse(store.is_target_dismissed("app:test"))
+            self.assertEqual(store.data["days"]["2026-08-28"]["app:test"], 42)
+            self.assertEqual(store.data["targets"]["app:test"]["category"], "Travail")
+            self.assertEqual(
+                store.data["app_limit_settings"]["app:test"]["limit_seconds"],
+                300,
+            )
+            self.assertFalse(AppUsageStore(path).is_target_dismissed("app:test"))
+
+    def test_dismissed_closed_program_waits_for_its_next_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.dismiss_target("app:future")
+
+            self.assertEqual(
+                store.data["dismissed_targets"]["app:future"],
+                "awaiting_launch",
+            )
+            store.observe_program_inventory([])
+            self.assertTrue(store.is_target_dismissed("app:future"))
+            store.observe_program_inventory(["app:future"])
+            self.assertFalse(store.is_target_dismissed("app:future"))
+
+    def test_excluded_target_can_be_deleted_permanently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            store.data["days"] = {"2026-08-28": {"app:test": 42}}
+            store.data["targets"] = {"app:test": {"label": "Test"}}
+            store.data["app_limit_settings"] = {
+                "app:test": {"limit_seconds": 300},
+            }
+            store.data["app_limit_days"] = {
+                "2026-08-28": {
+                    "app:test": {"seconds": 42, "extension_used": True},
+                },
+            }
+            store.data["app_limit_rolling"] = {
+                "app:test": {"buckets": {"2026-08-28T10:00": 42}},
+            }
+            store.data["app_limit_rolling_migrated"] = ["app:test"]
+            store.data["merged_targets"] = {
+                "app:alias": "app:test", "app:test": "app:other",
+            }
+            store.data["sessions"] = [{
+                "kind": "active", "key": "app:test", "label": "Test",
+                "started_at": "2026-08-28T10:00:00+02:00",
+                "ended_at": "2026-08-28T10:00:42+02:00",
+            }]
+            store.exclude("app:test")
+
+            store.delete_target("app:test")
+
+            self.assertNotIn("app:test", store.data["excluded"])
+            self.assertNotIn("app:test", store.data["targets"])
+            self.assertNotIn("app:test", store.data["days"]["2026-08-28"])
+            self.assertEqual(store.data["sessions"], [])
+            self.assertNotIn("app:test", store.data["app_limit_settings"])
+            self.assertNotIn(
+                "app:test", store.data["app_limit_days"]["2026-08-28"],
+            )
+            self.assertNotIn("app:test", store.data["app_limit_rolling"])
+            self.assertNotIn(
+                "app:test", store.data["app_limit_rolling_migrated"],
+            )
+            self.assertEqual(store.data["merged_targets"], {})
+
+            reloaded = AppUsageStore(path)
+            self.assertNotIn("app:test", reloaded.data["app_limit_settings"])
+            self.assertNotIn("app:test", reloaded.data["app_limit_rolling"])
+            self.assertNotIn(
+                "app:test",
+                reloaded.data["app_limit_days"]["2026-08-28"],
+            )
+
+    def test_permanent_delete_purges_uuid_rules_outbox_and_legacy_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            legacy = AppUsageStore._empty_data()
+            legacy.update({
+                "days": {
+                    "2026-08-28": {"app:test": 42, "app:kept": 12},
+                },
+                "targets": {
+                    "app:test": {"label": "Test"},
+                    "app:kept": {"label": "Kept"},
+                },
+                "excluded": ["app:test"],
+                "app_limit_settings": {
+                    "app:test#first": {
+                        "target_key": "app:test", "limit_seconds": 300,
+                    },
+                    "app:kept": {"limit_seconds": 600},
+                },
+                "app_limit_days": {"2026-08-28": {
+                    "app:test#first": {"seconds": 42},
+                    "app:test#offline": {"seconds": 21},
+                    "app:kept": {"seconds": 12},
+                }},
+                "app_limit_rolling": {
+                    "app:test#first": {"buckets": {}},
+                    "app:test#offline": {"buckets": {}},
+                    "app:kept": {"buckets": {}},
+                },
+                "app_limit_rolling_migrated": [
+                    "app:test#first", "app:test#offline", "app:kept",
+                ],
+                "personal_policy_overlay": {
+                    "active": True, "owner": "alice", "revision": 2,
+                    "local_settings": {
+                        "app:test#offline": {"target_key": "app:test"},
+                        "app:kept": {"limit_seconds": 600},
+                    },
+                },
+                "notification_rules": [{
+                    "id": "deleted-warning",
+                    "target_key": "app:test#first",
+                }, {
+                    "id": "kept-warning", "target_key": "app:kept",
+                }],
+                "sessions": [{
+                    "kind": "active", "key": "app:test", "label": "Test",
+                    "windows_sid": "S-1-5-21-1-2-3-1001",
+                    "started_at": "2026-08-28T10:00:00+02:00",
+                    "ended_at": "2026-08-28T10:00:42+02:00",
+                }],
+            })
+            path.write_text(
+                json.dumps(legacy, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            store = AppUsageStore(path)
+            self.assertTrue(store._append_backend_activity_interval({
+                "kind": "active", "id": "active:test", "key": "app:test",
+                "label": "Test", "windows_sid": "S-1-5-21-1-2-3-1001",
+                "started_at": "2026-08-28T10:00:00+02:00",
+                "ended_at": "2026-08-28T10:00:42+02:00",
+            }))
+            self.assertTrue(store._append_backend_activity_interval({
+                "kind": "active", "id": "active:kept", "key": "app:kept",
+                "label": "Kept", "windows_sid": "S-1-5-21-1-2-3-1001",
+                "started_at": "2026-08-28T11:00:00+02:00",
+                "ended_at": "2026-08-28T11:00:12+02:00",
+            }))
+
+            removed = store.delete_target("app:test")
+
+            self.assertEqual(
+                removed, ["app:test#first", "app:test#offline"],
+            )
+            self.assertEqual(
+                set(store.data["app_limit_settings"]), {"app:kept"},
+            )
+            self.assertEqual(
+                set(store.data["app_limit_days"]["2026-08-28"]),
+                {"app:kept"},
+            )
+            self.assertEqual(
+                set(store.data["app_limit_rolling"]), {"app:kept"},
+            )
+            self.assertEqual(
+                set(store.data["personal_policy_overlay"]["local_settings"]),
+                {"app:kept"},
+            )
+            self.assertEqual(
+                [rule["id"] for rule in store.data["notification_rules"]],
+                ["kept-warning"],
+            )
+            pending = store.pending_backend_activity_intervals()
+            self.assertEqual(
+                [item["key"] for item in pending["intervals"]],
+                ["app:kept"],
+            )
+            legacy_after = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn(
+                "app:test", legacy_after["days"]["2026-08-28"],
+            )
+            self.assertEqual(legacy_after["sessions"], [])
+            self.assertNotIn(
+                "app:test#first", legacy_after["app_limit_settings"],
+            )
+            reloaded = AppUsageStore(path)
+            self.assertNotIn(
+                "app:test", reloaded.data["days"]["2026-08-28"],
+            )
+            aggregates = reloaded.pending_backend_daily_aggregates()
+            deleted_metrics = [
+                metric for aggregate in aggregates
+                for metric in aggregate["metrics"]
+                if metric["key"] == "app:test"
+            ]
+            self.assertEqual(deleted_metrics, [])
+
+    def test_delete_browser_site_uses_full_target_deletion_guarantee(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            key = "site:brave.exe:youtube.com"
+            legacy = AppUsageStore._empty_data()
+            legacy.update({
+                "days": {"2026-08-28": {
+                    "site:brave.exe:other-sites": 100,
+                    key: 10,
+                }},
+                "other_site_days": {"brave.exe": {"2026-08-28": {
+                    "youtube.com": 60, "example.com": 40,
+                }}},
+                "browser_specific_sites": {"brave.exe": ["youtube.com"]},
+                "targets": {key: {"label": "YouTube"}},
+                "excluded": [key], "excluded_sites": [key],
+                "app_limit_settings": {
+                    f"{key}#web": {
+                        "target_key": key, "limit_seconds": 300,
+                    },
+                },
+                "sessions": [{
+                    "kind": "active", "key": key, "label": "YouTube",
+                    "started_at": "2026-08-28T10:00:00+02:00",
+                    "ended_at": "2026-08-28T10:01:00+02:00",
+                }],
+            })
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            store = AppUsageStore(path)
+
+            removed = store.delete_browser_site(
+                "BRAVE.EXE", "https://www.youtube.com/watch?v=1",
+            )
+
+            self.assertEqual(removed, [f"{key}#web"])
+            self.assertNotIn(key, store.data["targets"])
+            self.assertNotIn(key, store.data["excluded"])
+            self.assertNotIn(key, store.data["excluded_sites"])
+            self.assertEqual(store.data["sessions"], [])
+            self.assertEqual(
+                store.data["days"]["2026-08-28"],
+                {"site:brave.exe:other-sites": 40},
+            )
+            self.assertEqual(
+                store.data["other_site_days"]["brave.exe"]["2026-08-28"],
+                {"example.com": 40},
+            )
+            legacy_after = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                legacy_after["days"]["2026-08-28"],
+                {"site:brave.exe:other-sites": 40},
+            )
+
+    def test_replace_catalog_preserves_usage_limits_and_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            store.data.update({
+                "days": {"2026-08-28": {"app:old": 42}},
+                "sessions": [{"kind": "active", "key": "app:old"}],
+                "app_limit_settings": {"app:old": {"limit_seconds": 300}},
+                "computer_block": {"mode": "schedule"},
+                "notification_rules": [{"id": "notice"}],
+                "targets": {"app:old": {"label": "Old"}},
+                "category_order": ["Ancien"],
+            })
+            before = {
+                key: json.loads(json.dumps(store.data[key]))
+                for key in (
+                    "days", "sessions", "app_limit_settings",
+                    "computer_block", "notification_rules",
+                )
+            }
+            replacement = AppUsageStore._empty_data()
+            replacement = {
+                key: replacement[key] for key in store.catalog_document()
+            }
+            replacement["targets"] = {
+                "app:new": {"label": "New", "category": "Travail"},
+            }
+            replacement["category_order"] = ["Travail"]
+
+            store.replace_catalog(replacement)
+            replacement["targets"]["app:new"]["label"] = "Mutated later"
+
+            self.assertEqual(store.catalog_document()["category_order"], ["Travail"])
+            self.assertEqual(store.data["targets"]["app:new"]["label"], "New")
+            self.assertNotIn("app:old", store.data["targets"])
+            for key, value in before.items():
+                self.assertEqual(store.data[key], value)
+            reloaded = AppUsageStore(path)
+            self.assertEqual(reloaded.data["days"], before["days"])
+            self.assertEqual(reloaded.data["category_order"], ["Travail"])
+
+    def test_manual_items_persist_without_creating_usage(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+
+            store.add_catalog_item("category", "Travail")
+            store.add_catalog_item(
+                "application", r"C:\Tools\NeverRun.exe", label="Jamais lancée",
+            )
+            store.add_catalog_item("site", "https://example.fr/page")
+
+            reloaded = AppUsageStore(path)
+            entries = {entry.key: entry for entry in reloaded.presentation({})}
+            self.assertIn("Travail", reloaded.top_level_categories())
+            self.assertIn("app:neverrun", entries)
+            self.assertIn("site:brave.exe:example.fr", entries)
+            self.assertEqual(entries["app:neverrun"].seconds, 0)
+            self.assertEqual(entries["site:brave.exe:example.fr"].seconds, 0)
+            self.assertEqual(reloaded.data["days"], {})
+
+            target = reloaded.target_for_context(ActiveContext(
+                app_name="NeverRun.exe", window_title="NeverRun",
+            ))
+            self.assertEqual(target.key, "app:neverrun")
+            self.assertEqual(target.label, "Jamais lancée")
+
+            site = reloaded.target_for_context(ActiveContext(
+                app_name="brave.exe", window_title="Example",
+                url="https://example.fr/first-visit",
+            ))
+            self.assertEqual(site.key, "site:brave.exe:example.fr")
+
+    def test_manual_empty_child_category_remains_in_the_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.add_catalog_item("category", "Parent")
+            store.add_catalog_item("category", "Enfant", parent="Parent")
+
+            self.assertIn("Enfant", store.categories())
+            self.assertEqual(store.data["category_parents"]["Enfant"], "Parent")
+
+    def test_browser_executable_cannot_be_added_as_a_regular_application(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            with self.assertRaisesRegex(ValueError, "navigateur"):
+                store.add_catalog_item("application", "brave.exe")
+
+
+class PersonalPolicyOverlayTest(unittest.TestCase):
+    @staticmethod
+    def limiter(store):
+        limiter = AppLimiter.__new__(AppLimiter)
+        limiter.usage = store
+        limiter.policies = {}
+        limiter.blocked = False
+        limiter.target_key = ""
+        limiter._personal_usage = {}
+        limiter._personal_usage_baselines = {}
+        limiter._reload_policies()
+        return limiter
+
+    def test_enforced_policy_preserves_and_restores_local_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            local = store.set_app_limit_settings("app:local", {
+                "enabled": True, "limit_seconds": 600,
+                "extension_seconds": 60, "warning_seconds": 30,
+            })
+            limiter = self.limiter(store)
+
+            limiter.activate_personal_policy("alice", 4, [{
+                "key": "app:server", "target_key": "app:server",
+                "enabled": False, "limit_seconds": 300,
+                "extension_seconds": 0, "warning_seconds": 30,
+            }])
+
+            self.assertEqual(set(limiter.policies), {"app:server"})
+            self.assertFalse(limiter.policies["app:server"]["enabled"])
+            self.assertEqual(
+                limiter.policies["app:server"]["managed_by"], "backend",
+            )
+            reloaded = AppUsageStore(path)
+            restored_limiter = self.limiter(reloaded)
+            self.assertTrue(restored_limiter.deactivate_personal_policy())
+            self.assertEqual(restored_limiter.policies, {"app:local": local})
+            self.assertEqual(
+                reloaded.data["personal_policy_overlay"], {},
+            )
+
+    def test_personal_usage_adds_only_activity_after_server_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            limiter = self.limiter(store)
+            limiter.activate_personal_policy("alice", 2, [{
+                "key": "app:test", "enabled": True,
+                "limit_seconds": 300, "extension_seconds": 0,
+                "warning_seconds": 30,
+            }])
+            store.add_app_limit_seconds("app:test", 20)
+            limiter.set_personal_usage({
+                "usage_guard_username": "alice", "policy_revision": 2,
+                "measured_at": "2026-08-24T08:00:00+02:00",
+                "totals": {"app:test": {"seconds": 100}},
+            })
+            store.add_app_limit_seconds("app:test", 5)
+
+            self.assertEqual(
+                limiter.current_status("app:test")["seconds"], 105,
+            )
 
 
 class AppUsageStoreSessionsTest(unittest.TestCase):
+    def test_system_events_are_persisted_for_power_timeline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            store.record_system_event("sleep", at="2026-08-21T12:00:00+02:00")
+            store.record_system_event("resume", at="2026-08-21T12:30:00+02:00")
+
+            reloaded = AppUsageStore(path)
+
+            self.assertEqual(
+                [event["type"] for event in reloaded.system_events()],
+                ["sleep", "resume"],
+            )
+
     def test_generic_browser_activity_has_no_site_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")
@@ -79,6 +853,42 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertEqual(store.set_default_limit_warning_seconds(420), 420)
             self.assertEqual(AppUsageStore(path).default_limit_warning_seconds(), 420)
 
+    def test_limit_extension_unit_is_persisted_with_its_seconds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            saved = store.set_app_limit_settings("app:editor", {
+                "limit_seconds": 7200,
+                "extension_seconds": 3600,
+                "extension_unit": "minutes",
+                "warning_seconds": 300,
+            })
+
+            self.assertEqual(saved["extension_unit"], "minutes")
+            self.assertEqual(
+                AppUsageStore(path).app_limit_settings("app:editor")["extension_unit"],
+                "minutes",
+            )
+
+    def test_limit_enforcement_action_defaults_to_block_and_persists_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+
+            self.assertEqual(
+                store.set_app_limit_settings("app:block", {})["enforcement_action"],
+                "block",
+            )
+            warned = store.set_app_limit_settings("app:warn", {
+                "enforcement_action": "warn",
+            })
+
+            self.assertEqual(warned["enforcement_action"], "warn")
+            self.assertEqual(
+                AppUsageStore(path).app_limit_settings("app:warn")["enforcement_action"],
+                "warn",
+            )
+
     def test_notification_rules_only_include_explicit_configuration(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "activity.json"
@@ -115,9 +925,11 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertEqual(email_rule["channels"], ["email"])
             self.assertEqual(email_rule["email_recipient"], "alice@example.test")
             self.assertEqual(both_rule["channels"], ["windows", "email"])
-            stored = (Path(directory) / "activity.json").read_text(encoding="utf-8")
-            self.assertNotIn("alice@example.test", stored)
-            self.assertNotIn("bob@example.test", stored)
+            self.assertNotIn("custom_title", both_rule)
+            self.assertNotIn("custom_message", both_rule)
+            stored = store.activity_database_path.read_bytes()
+            self.assertNotIn(b"alice@example.test", stored)
+            self.assertNotIn(b"bob@example.test", stored)
             reloaded = AppUsageStore(Path(directory) / "activity.json")
             self.assertEqual(
                 reloaded.notification_rules()[0]["email_recipient"],
@@ -128,17 +940,55 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
                     "kind": "pwa_login", "channels": ["email"],
                 })
 
+    def test_pwa_login_role_scope_and_owner_are_persisted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+
+            rule = store.set_notification_rule({
+                "kind": "pwa_login", "owner": "admin",
+                "login_role_scope": "users",
+            })
+
+            self.assertEqual(rule["owner"], "admin")
+            self.assertEqual(rule["login_role_scope"], "users")
+            self.assertEqual(rule["subject_roles"], ["limited", "user"])
+            self.assertEqual(
+                AppUsageStore(Path(directory) / "activity.json")
+                .notification_rules()[0]["login_role_scope"],
+                "users",
+            )
+            with self.assertRaisesRegex(ValueError, "compte à surveiller"):
+                store.set_notification_rule({
+                    "kind": "pwa_login", "login_role_scope": "unknown",
+                })
+
+            exact = store.set_notification_rule({
+                "kind": "access_change",
+                "subject_roles": ["admin", "limited"],
+            })
+            self.assertEqual(exact["subject_roles"], ["limited", "admin"])
+            with self.assertRaisesRegex(ValueError, "rôle concerné"):
+                store.set_notification_rule({
+                    "kind": "access_change", "subject_roles": [],
+                })
+
     def test_requested_notification_kinds_are_persisted(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")
             store.data["app_limit_settings"] = {
                 "app:editor": {
                     "enabled": True, "limit_seconds": 3600,
-                    "extension_seconds": 900, "warning_seconds": 300,
+                    "extension_seconds": 900, "extension_unit": "minutes",
+                    "warning_seconds": 300,
                 }
             }
+            self.assertEqual(
+                store.app_limit_settings("app:editor")["extension_unit"],
+                "minutes",
+            )
             for kind in (
-                "limited_app_start", "limit_warning", "limit_extension",
+                "limited_app_start", "limit_warning", "limit_reached",
+                "limit_extension", "computer_state",
                 "usage_threshold",
             ):
                 rule = store.set_notification_rule({
@@ -147,6 +997,7 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
                 })
                 self.assertEqual(rule["kind"], kind)
             login = store.set_notification_rule({"kind": "pwa_login"})
+            access_change = store.set_notification_rule({"kind": "access_change"})
             change = store.set_notification_rule({"kind": "limit_change"})
             computer_warning = store.set_notification_rule({
                 "kind": "computer_block_warning", "warning_seconds": 900,
@@ -154,10 +1005,57 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             computer_change = store.set_notification_rule({
                 "kind": "computer_block_change",
             })
+            protection = store.set_notification_rule({
+                "kind": "protection_interrupted",
+            })
+            reached = store.set_notification_rule({"kind": "limit_reached"})
+            computer_state = store.set_notification_rule({"kind": "computer_state"})
             self.assertEqual(login["label"], "Connexion à la PWA")
+            self.assertEqual(
+                access_change["label"],
+                "Changement de droits d’un utilisateur",
+            )
             self.assertIn("Ajout", change["label"])
+            self.assertEqual(reached["label"], "Limite atteinte")
+            self.assertEqual(
+                computer_state["label"], "Ordinateur allumé, éteint ou en veille"
+            )
             self.assertEqual(computer_warning["warning_seconds"], 900)
-            self.assertIn("ordinateur", computer_change["label"])
+            self.assertEqual(computer_warning["kind"], "limit_warning")
+            self.assertEqual(computer_change["kind"], "limit_change")
+            self.assertEqual(
+                computer_change["label"],
+                "Ajout, modification ou suppression d’une limite",
+            )
+            self.assertEqual(
+                protection["label"], "Interruption de la protection"
+            )
+
+    def test_legacy_computer_limit_notifications_merge_on_load(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            store.data["notification_rules"] = [{
+                "id": "shared", "kind": "limit_change", "owner": "nicklaus",
+                "channels": ["email"],
+                "email_recipient": "owner@example.test",
+            }, {
+                "id": "legacy-change", "kind": "computer_block_change",
+                "owner": "nicklaus", "channels": ["windows"],
+            }, {
+                "id": "legacy-warning", "kind": "computer_block_warning",
+                "owner": "nicklaus", "channels": ["windows"],
+            }]
+            store.save(force=True)
+
+            rules = AppUsageStore(path).notification_rules()
+
+            self.assertEqual(
+                [rule["kind"] for rule in rules],
+                ["limit_change", "limit_warning"],
+            )
+            self.assertEqual(rules[0]["id"], "shared")
+            self.assertEqual(rules[0]["channels"], ["windows", "email"])
 
     def test_start_notification_applies_to_all_limited_apps(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -233,9 +1131,19 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
                 "enabled": False, "limit_seconds": 600,
                 "extension_seconds": 60, "warning_seconds": 60,
             })
+            retained = store.set_app_limit_settings("app:retained", {
+                "enabled": True, "limit_seconds": 600,
+                "extension_seconds": 60, "warning_seconds": 60,
+                "valid_until": "2026-08-15", "valid_until_time": "10:00",
+                "delete_after_expiry": False,
+            })
+            retained = store.app_limit_settings("app:retained")
             limiter = AppLimiter.__new__(AppLimiter)
             limiter.usage = store
-            limiter.policies = {"app:expired": expired, "app:disabled": disabled}
+            limiter.policies = {
+                "app:expired": expired, "app:disabled": disabled,
+                "app:retained": retained,
+            }
             limiter.blocked = False
 
             removed = limiter.prune_expired_limits(
@@ -245,7 +1153,9 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertEqual(removed, ["app:expired"])
             self.assertNotIn("app:expired", limiter.policies)
             self.assertIn("app:disabled", limiter.policies)
+            self.assertIn("app:retained", limiter.policies)
             self.assertIn("app:disabled", store.data["app_limit_settings"])
+            self.assertIn("app:retained", store.data["app_limit_settings"])
 
     def test_duplicate_category_limit_rules_match_the_same_activity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -323,6 +1233,11 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertEqual(settings["valid_until_time"], "21:15")
             self.assertEqual(settings["schedule_start"], "18:00")
             self.assertEqual(settings["schedule_end"], "20:00")
+            self.assertEqual(settings["managed_by"], "local")
+            remote = store.set_app_limit_settings("app:remote", {
+                "limit_seconds": 60, "managed_by": "backend",
+            })
+            self.assertEqual(remote["managed_by"], "backend")
             with self.assertRaisesRegex(ValueError, "Heure"):
                 store.set_app_limit_settings("app:test", {
                     **settings, "blocked_after": "25:00",
@@ -467,17 +1382,231 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertEqual(today_end.minute, 0)
             self.assertEqual(today["actor"], "alice")
 
-            rolling = store.set_computer_block("24h")
+            rolling = store.set_computer_block("24h", managed_by="backend")
             start = datetime.fromisoformat(rolling["started_at"])
             end = datetime.fromisoformat(rolling["ends_at"])
             self.assertAlmostEqual((end - start).total_seconds(), 86400, delta=1)
-            disabled = store.set_computer_block_enabled(False)
+            disabled = store.set_computer_block_enabled(
+                False, block_id=rolling["block_id"], managed_by="local",
+            )
             self.assertFalse(disabled["enabled"])
             self.assertEqual(disabled["started_at"], rolling["started_at"])
-            enabled = store.set_computer_block_enabled(True)
+            self.assertEqual(disabled["managed_by"], "local")
+            enabled = store.set_computer_block_enabled(
+                True, block_id=rolling["block_id"],
+            )
             self.assertTrue(enabled["enabled"])
-            store.clear_computer_block()
+            store.clear_computer_block(rolling["block_id"])
+            store.clear_computer_block(today["block_id"])
             self.assertEqual(store.data["computer_block"], {})
+
+    def test_legacy_computer_block_migrates_once_with_stable_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            path.write_text(json.dumps({
+                "version": 2,
+                "days": {},
+                "computer_block": {
+                    "enabled": True,
+                    "mode": "schedule",
+                    "name": "Nuit",
+                    "daily_start": "22:30",
+                    "daily_end": "05:00",
+                },
+            }), encoding="utf-8")
+
+            migrated = AppUsageStore(path)
+            self.assertEqual(len(migrated.computer_blocks()), 1)
+            first = migrated.computer_blocks()[0]
+            self.assertTrue(first["block_id"])
+            self.assertEqual(first["name"], "Nuit")
+            self.assertEqual(migrated.data["computer_block"], first)
+
+            reloaded = AppUsageStore(path)
+            self.assertEqual(reloaded.computer_blocks(), [first])
+            self.assertEqual(reloaded.data["computer_block"], first)
+
+    def test_computer_blocks_coexist_and_return_independent_copies(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            now = datetime.fromisoformat("2026-08-28T12:00:00+02:00")
+            first = store.set_computer_block(
+                "schedule", name="Pause", start_time="19:30",
+                end_time="19:32", now=now,
+            )
+            second = store.set_computer_block(
+                "schedule", name="Nuit", start_time="22:30",
+                end_time="05:00", now=now,
+            )
+
+            self.assertNotEqual(first["block_id"], second["block_id"])
+            self.assertEqual(
+                [block["name"] for block in store.computer_blocks()],
+                ["Pause", "Nuit"],
+            )
+            copies = store.computer_blocks()
+            copies[0]["name"] = "modifié hors stockage"
+            self.assertEqual(store.computer_block(first["block_id"])["name"], "Pause")
+
+    def test_computer_block_edit_toggle_and_delete_target_exact_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            now = datetime.fromisoformat("2026-08-28T12:00:00+02:00")
+            first = store.set_computer_block(
+                "schedule", name="Nuit", start_time="22:30",
+                end_time="05:00", now=now,
+            )
+            second = store.set_computer_block(
+                "schedule", name="Pause", start_time="19:30",
+                end_time="19:32", now=now,
+            )
+
+            edited = store.set_computer_block(
+                "schedule", block_id=first["block_id"],
+                start_time="23:00", end_time="06:00", now=now,
+            )
+            self.assertEqual(edited["block_id"], first["block_id"])
+            self.assertEqual(edited["name"], "Nuit")
+            self.assertEqual(edited["daily_start"], "23:00")
+            self.assertEqual(store.computer_block(second["block_id"]), second)
+
+            disabled = store.set_computer_block_enabled(
+                False, block_id=first["block_id"], managed_by="backend",
+            )
+            self.assertFalse(disabled["enabled"])
+            self.assertEqual(disabled["name"], "Nuit")
+            self.assertTrue(store.computer_block(second["block_id"])["enabled"])
+
+            removed = store.clear_computer_block(first["block_id"])
+            self.assertEqual(removed["block_id"], first["block_id"])
+            self.assertEqual(store.computer_blocks(), [second])
+            self.assertEqual(store.data["computer_block"], second)
+            store.set_effective_computer_block({"block": second})
+            self.assertEqual(store.data["computer_block"], second)
+
+    def test_computer_warning_action_is_persisted_and_preserved_on_edit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            now = datetime.fromisoformat("2026-08-28T12:00:00+02:00")
+            created = store.set_computer_block(
+                "schedule", start_time="22:00", end_time="23:00",
+                enforcement_action="warn", now=now,
+            )
+
+            self.assertEqual(created["enforcement_action"], "warn")
+            edited = store.set_computer_block(
+                "schedule", block_id=created["block_id"],
+                start_time="22:30", end_time="23:30", now=now,
+            )
+            self.assertEqual(edited["enforcement_action"], "warn")
+
+    def test_computer_block_commands_without_id_reject_ambiguity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            first = store.set_computer_block("today", name="Aujourd’hui")
+            second = store.set_computer_block("24h", name="24 heures")
+
+            for operation in (
+                store.computer_block,
+                lambda: store.set_computer_block_enabled(False),
+                store.clear_computer_block,
+            ):
+                with self.assertRaisesRegex(ValueError, "block_id est requis"):
+                    operation()
+            third = store.set_computer_block("today", name="Nouvelle")
+            self.assertEqual(len(store.computer_blocks()), 3)
+            self.assertEqual(store.computer_block(first["block_id"])["name"], "Aujourd’hui")
+            self.assertEqual(store.computer_block(second["block_id"])["name"], "24 heures")
+            self.assertEqual(store.computer_block(third["block_id"])["name"], "Nouvelle")
+
+    def test_replace_computer_blocks_reconciles_backend_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            local = store.set_computer_block("today", name="Locale en attente")
+            obsolete = store.set_computer_block(
+                "today", name="Ancienne distante", managed_by="backend",
+            )
+            document = [{
+                "block_id": "remote-night", "mode": "schedule",
+                "enabled": True, "name": "Nuit",
+                "start_time": "22:30", "end_time": "05:00",
+                "valid_from": "", "valid_from_time": "",
+                "valid_until": "", "valid_until_time": "",
+            }, {
+                "block_id": "remote-short", "mode": "schedule",
+                "enabled": False, "name": "Pause",
+                "start_time": "19:30", "end_time": "19:32",
+            }]
+
+            first = store.replace_computer_blocks(document)
+            second = store.replace_computer_blocks(document)
+
+            self.assertEqual(first, second)
+            self.assertEqual(
+                [item["block_id"] for item in second],
+                ["remote-night", "remote-short", local["block_id"]],
+            )
+            self.assertNotIn(
+                obsolete["block_id"],
+                [item["block_id"] for item in second],
+            )
+            self.assertEqual(second[0]["daily_start"], "22:30")
+            self.assertEqual(second[0]["daily_end"], "05:00")
+            self.assertEqual(second[0]["managed_by"], "backend")
+            self.assertFalse(second[1]["enabled"])
+            self.assertEqual(second[2], local)
+            self.assertEqual(second[2]["managed_by"], "local")
+            self.assertEqual(store.data["computer_block"], {})
+
+    def test_first_server_ack_keeps_second_nearby_local_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            now = datetime.fromisoformat("2026-08-28T18:00:00+02:00")
+            first = store.set_computer_block(
+                "schedule", name="Première locale",
+                start_time="19:30", end_time="19:32", now=now,
+            )
+            second = store.set_computer_block(
+                "schedule", name="Deuxième locale",
+                start_time="22:30", end_time="05:00", now=now,
+            )
+
+            reconciled = store.replace_computer_blocks([{
+                "block_id": first["block_id"],
+                "mode": "schedule", "enabled": False,
+                "name": "Première confirmée",
+                "start_time": "19:30", "end_time": "19:32",
+            }], now=now)
+
+            self.assertEqual(
+                [block["block_id"] for block in reconciled],
+                [first["block_id"], second["block_id"]],
+            )
+            by_id = {block["block_id"]: block for block in reconciled}
+            self.assertEqual(by_id[first["block_id"]]["managed_by"], "backend")
+            self.assertEqual(by_id[first["block_id"]]["name"], "Première confirmée")
+            self.assertFalse(by_id[first["block_id"]]["enabled"])
+            self.assertEqual(by_id[second["block_id"]], second)
+            self.assertEqual(by_id[second["block_id"]]["managed_by"], "local")
+
+    def test_duplicate_server_ids_are_rejected_without_touching_local_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            local = store.set_computer_block("today", name="Locale")
+            before = store.computer_blocks()
+            duplicate = {
+                "block_id": local["block_id"], "mode": "schedule",
+                "start_time": "19:30", "end_time": "19:32",
+            }
+
+            with self.assertRaisesRegex(ValueError, "dupliqué"):
+                store.replace_computer_blocks([duplicate, dict(duplicate)])
+
+            self.assertEqual(store.computer_blocks(), before)
+            self.assertEqual(
+                store.computer_block(local["block_id"])["managed_by"],
+                "local",
+            )
 
     def test_computer_block_supports_a_day_and_today_time_range(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -596,6 +1725,29 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
                 5400,
             )
 
+    def test_existing_limit_reconciles_today_after_a_new_day_starts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["days"] = {"2026-08-16": {"app:editor": 1800.0}}
+            store.data["app_limit_rolling"]["app:editor"] = {
+                "buckets": {},
+                "extension_granted_at": None,
+                "usage_seeded_at": "2026-08-15T12:00:00+02:00",
+                "usage_seed_version": 4,
+            }
+            now = datetime.fromisoformat("2026-08-16T09:00:00+02:00")
+
+            store.prepare_app_limit("app:editor", 3600, 900, now)
+
+            self.assertEqual(
+                store.app_limit_state_for_day("app:editor", now)["seconds"],
+                1800,
+            )
+            self.assertEqual(
+                store.data["app_limit_rolling"]["app:editor"]["usage_seeded_at"],
+                "2026-08-16T09:00:00+02:00",
+            )
+
     def test_reset_limit_does_not_restore_prior_usage(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")
@@ -675,7 +1827,7 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
 
             self.assertEqual(
                 store.top_level_categories(),
-                ["Divertissement", "Internet"],
+                ["Divertissement"],
             )
             entries = store.presentation({})
             self.assertEqual(
@@ -778,6 +1930,67 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertTrue(store.data["site_category_order_manual"])
             self.assertEqual(store.data["targets"]["site:brave:test"]["site_category"], "Actualité")
 
+    def test_targets_can_be_reordered_without_changing_their_category(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["targets"] = {
+                "app:alpha": {"label": "Alpha", "category": "Travail"},
+                "app:beta": {"label": "Beta", "category": "Travail"},
+                "app:gamma": {"label": "Gamma", "category": "Travail"},
+                "app:game": {"label": "Game", "category": "Loisirs"},
+            }
+
+            store.reorder_target(
+                "app:gamma", "app:alpha", before=True,
+                displayed_siblings=["app:alpha", "app:beta", "app:gamma"],
+            )
+
+            self.assertEqual(
+                store.data["target_order"],
+                ["app:gamma", "app:alpha", "app:beta"],
+            )
+            self.assertEqual(
+                store.data["targets"]["app:gamma"]["category"], "Travail",
+            )
+            self.assertEqual(
+                AppUsageStore(store.path).data["target_order"],
+                ["app:gamma", "app:alpha", "app:beta"],
+            )
+            with self.assertRaisesRegex(ValueError, "même catégorie"):
+                store.reorder_target("app:gamma", "app:game")
+
+    def test_navigation_can_be_reordered_without_moving_sites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["category_parents"] = {
+                "Travail": "", "Loisirs": "",
+            }
+            store.data["category_order"] = ["Travail", "Loisirs"]
+            store.data["targets"]["site:brave.exe:example.test"] = {
+                "label": "example.test", "site_category": "Actualité",
+            }
+
+            store.reorder_navigation("Travail", before=False)
+
+            self.assertEqual(store.data["navigation_position"], {
+                "destination": "Travail", "before": False,
+            })
+            self.assertEqual(
+                store.data["targets"]["site:brave.exe:example.test"]
+                ["site_category"],
+                "Actualité",
+            )
+            self.assertEqual(
+                AppUsageStore(store.path).data["navigation_position"],
+                {"destination": "Travail", "before": False},
+            )
+            store.reorder_unclassified("Loisirs", before=True)
+            self.assertEqual(store.data["unclassified_position"], {
+                "destination": "Loisirs", "before": True,
+            })
+            with self.assertRaisesRegex(ValueError, "introuvable"):
+                store.reorder_navigation("Inconnue")
+
     def test_loopback_ports_remain_distinct(self):
         self.assertEqual(_site_host("http://localhost:3000/app"), "localhost:3000")
         self.assertEqual(_site_host("http://localhost:5173/app"), "localhost:5173")
@@ -806,6 +2019,7 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             ))
             self.assertEqual(target.key, "site:brave.exe:localhost:8766")
             self.assertEqual(target.label, "Usage Guard")
+            self.assertEqual(target.category, "__root__")
 
     def test_usage_guard_local_pwa_can_move_to_a_top_level_category(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -822,6 +2036,30 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             metadata = store.data["targets"][key]
             self.assertEqual(metadata["category"], "Programmation")
             self.assertNotIn("site_category", metadata)
+
+            store.set_category(key, "")
+
+            metadata = store.data["targets"][key]
+            self.assertEqual(metadata["category"], "__root__")
+            self.assertNotIn("category_scope", metadata)
+
+    def test_legacy_site_is_removed_from_unclassified_applications(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            key = "site:brave.exe:example.test"
+            store.data["browser_categories"]["brave.exe"] = "__root__"
+            store.data["targets"][key] = {
+                "label": "example.test",
+                "category": "Applications non classées",
+                "category_scope": "site",
+            }
+
+            store._migrate_legacy_targets()
+
+            metadata = store.data["targets"][key]
+            self.assertEqual(metadata["category"], "__root__")
+            self.assertNotIn("category_scope", metadata)
+            self.assertNotIn("Applications non classées", store.top_level_categories())
 
     def test_regular_site_moves_out_of_browser_into_a_general_category(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -942,6 +2180,57 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             store.update_sessions({}, at="2026-08-13T11:00:00+02:00")
             self.assertEqual(store.data["sessions"][-1]["ended_at"], "2026-08-13T12:00:00+02:00")
 
+    def test_open_session_started_before_midnight_remains_in_today_period(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.update_sessions({
+                "program:app:editor": {
+                    "kind": "program", "key": "app:editor", "label": "Editor",
+                },
+            }, at="2026-08-24T23:55:00+02:00")
+
+            sessions = store.sessions_for_period(
+                date(2026, 8, 25), date(2026, 8, 25)
+            )
+
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["started_at"], "2026-08-24T23:55:00+02:00")
+            self.assertIsNone(sessions[0]["ended_at"])
+
+    def test_windows_day_returns_the_complete_cross_midnight_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["windows_sessions"] = [{
+                "started_at": "2026-08-28T07:11:08+02:00",
+                "ended_at": "2026-08-29T01:33:35+02:00",
+            }]
+            kona_before_midnight = {
+                "kind": "active", "key": "app:kona", "label": "Kona",
+                "started_at": "2026-08-28T22:09:55+02:00",
+                "ended_at": "2026-08-28T22:35:46+02:00",
+            }
+            kona_after_midnight = {
+                "kind": "active", "key": "app:kona", "label": "Kona",
+                "started_at": "2026-08-29T00:05:00+02:00",
+                "ended_at": "2026-08-29T00:15:00+02:00",
+            }
+            store.data["sessions"] = [
+                kona_before_midnight, kona_after_midnight,
+            ]
+
+            sessions_before = store.sessions_for_windows_day(
+                date(2026, 8, 28),
+                now=datetime.fromisoformat("2026-08-29T08:00:00+02:00"),
+            )
+            sessions_after = store.sessions_for_windows_day(
+                date(2026, 8, 29),
+                now=datetime.fromisoformat("2026-08-29T08:00:00+02:00"),
+            )
+
+            expected = [kona_after_midnight, kona_before_midnight]
+            self.assertEqual(sessions_before, expected)
+            self.assertEqual(sessions_after, expected)
+
     def test_program_already_open_is_marked_without_inventing_an_earlier_time(self):
         with tempfile.TemporaryDirectory() as directory:
             store = AppUsageStore(Path(directory) / "activity.json")
@@ -993,6 +2282,100 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
             self.assertEqual(sessions[0]["started_at"], second)
             self.assertIsNone(sessions[0]["ended_at"])
             self.assertEqual(sessions[1]["ended_at"], first)
+
+    def test_verified_power_boundary_closes_current_logical_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.record_windows_session(
+                "2026-08-25T21:51:42+02:00",
+                observed_at="2026-08-26T08:00:00+02:00",
+            )
+
+            store.close_windows_session(
+                "2026-08-25T23:26:23+02:00", reason="sleep",
+            )
+            store.record_windows_session(
+                "2026-08-26T07:01:37+02:00",
+                source="extended-modern-standby",
+            )
+
+            sessions = store.windows_sessions()
+            self.assertEqual(sessions[0]["source"], "extended-modern-standby")
+            self.assertEqual(sessions[1]["ended_at"], "2026-08-25T23:26:23+02:00")
+            self.assertEqual(sessions[1]["ended_reason"], "sleep")
+            self.assertEqual(sessions[1]["last_observed_at"], "2026-08-25T23:26:23+02:00")
+
+    def test_screen_timeout_repairs_adjacent_artificial_windows_sessions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            identity = {
+                "windows_sid": "S-1-5-21-1-2-3-1001",
+                "windows_username": "alice",
+            }
+            store.record_windows_session(
+                "2026-08-26T07:01:37+02:00", identity=identity,
+            )
+            store.close_windows_session(
+                "2026-08-26T07:12:13+02:00", reason="sleep",
+            )
+            store.record_windows_session(
+                "2026-08-26T07:20:10+02:00", identity=identity,
+                source="extended-modern-standby",
+            )
+
+            merged = store.merge_windows_sessions_across_periods([(
+                datetime.fromisoformat("2026-08-26T07:12:13+02:00"),
+                datetime.fromisoformat("2026-08-26T07:20:10+02:00"),
+            )])
+
+            self.assertEqual(merged, 1)
+            sessions = store.windows_sessions()
+            self.assertEqual(len(sessions), 1)
+            self.assertEqual(sessions[0]["started_at"], "2026-08-26T07:01:37+02:00")
+            self.assertIsNone(sessions[0]["ended_at"])
+            self.assertTrue(sessions[0]["screen_idle_repaired"])
+
+    def test_windows_identity_is_stamped_on_session_and_activity_intervals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            identity = {
+                "session_id": 7,
+                "windows_sid": "S-1-5-21-1-2-3-1001",
+                "windows_domain": "PC",
+                "windows_username": "Alice",
+                "is_windows_admin": False,
+                "usage_guard_username": "alice",
+                "mapped": True,
+                "mapping_status": "mapped",
+            }
+            store.record_windows_session(
+                "2026-08-13T07:27:29+02:00", identity=identity
+            )
+            store.update_sessions({
+                "program:editor.exe": {
+                    "kind": "program", "key": "app:editor",
+                    "label": "Editor",
+                },
+                "active:editor.exe": {
+                    "kind": "active", "key": "app:editor",
+                    "label": "Editor", "category": "Programmation",
+                    "category_lineage": ["Programmation", "Travail"],
+                    "policy_revision": 4,
+                }
+            }, at="2026-08-13T07:28:00+02:00")
+
+            windows_session = store.windows_sessions()[0]
+            activity = store.data["open_sessions"]["program:editor.exe"]
+            for item in (windows_session, activity):
+                self.assertEqual(item["usage_guard_username"], "alice")
+                self.assertEqual(item["windows_sid"], identity["windows_sid"])
+                self.assertTrue(item["windows_identity_mapped"])
+                self.assertEqual(item["windows_session_id"], 7)
+            foreground = store.data["open_sessions"]["active:editor.exe"]
+            self.assertEqual(
+                foreground["category_lineage"], ["Programmation", "Travail"]
+            )
+            self.assertEqual(foreground["policy_revision"], 4)
 
     def test_windows_session_ends_at_its_last_observation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1093,6 +2476,481 @@ class AppUsageStoreSessionsTest(unittest.TestCase):
                     if item.get("source") == "legacy-daily-total"
                 ]),
                 3,
+            )
+
+
+    def test_optional_limit_names_are_trimmed_persisted_and_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+
+            limit = store.set_app_limit_settings("category:Jeux", {
+                "name": "  Soir sans jeux  ",
+                "target_key": "category:Jeux",
+                "limit_seconds": 3600,
+                "extension_seconds": 300,
+                "warning_seconds": 300,
+            })
+            block = store.set_computer_block(
+                "schedule", name="  Nuit  ", start_time="22:30",
+                end_time="05:00",
+                now=datetime(2026, 8, 28, 18, 0).astimezone(),
+            )
+
+            self.assertEqual(limit["name"], "Soir sans jeux")
+            self.assertEqual(block["name"], "Nuit")
+            reloaded = AppUsageStore(path)
+            self.assertEqual(
+                reloaded.app_limit_settings("category:Jeux")["name"],
+                "Soir sans jeux",
+            )
+            self.assertEqual(reloaded.data["computer_block"]["name"], "Nuit")
+            with self.assertRaisesRegex(ValueError, "120 caractères"):
+                store.set_app_limit_settings("app:test", {
+                    "name": "x" * 121, "limit_seconds": 60,
+                })
+            with self.assertRaisesRegex(ValueError, "120 caractères"):
+                store.set_computer_block("today", name="x" * 121)
+
+class BackendActivityOutboxTest(unittest.TestCase):
+    @staticmethod
+    def _session(key, minute):
+        return {
+            "windows_sid": "S-1-5-21-1-2-3-1001",
+            "usage_guard_username": "nicklaus",
+            "windows_identity_mapped": True,
+            "id": f"active:{key}", "kind": "active", "key": key,
+            "label": key,
+            "started_at": f"2026-08-30T08:{minute:02d}:00+02:00",
+            "ended_at": f"2026-08-30T08:{minute:02d}:30+02:00",
+        }
+
+    def test_recent_backfill_is_bounded_and_runs_only_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            recent = datetime.now().astimezone() - timedelta(hours=1)
+            store.data["sessions"] = []
+            for offset in (0, 2):
+                session = self._session("app:morning", offset)
+                opened = recent + timedelta(minutes=offset)
+                session["started_at"] = opened.isoformat(timespec="seconds")
+                session["ended_at"] = (
+                    opened + timedelta(seconds=30)
+                ).isoformat(timespec="seconds")
+                store.data["sessions"].append(session)
+            store.data["backend_activity_backfill_version"] = 0
+            store.activity_outbox_path.unlink(missing_ok=True)
+
+            self.assertTrue(store._ensure_recent_backend_activity_backfill())
+            first = store.pending_backend_activity_intervals()["intervals"]
+            self.assertEqual(len(first), 2)
+            self.assertEqual(
+                {item["key"] for item in first}, {"app:morning"},
+            )
+            size = store.activity_outbox_path.stat().st_size
+
+            self.assertFalse(store._ensure_recent_backend_activity_backfill())
+            self.assertEqual(store.activity_outbox_path.stat().st_size, size)
+
+    def test_other_sites_aggregate_closure_is_usage_only_and_recent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            store._active_windows_identity = {
+                "windows_sid": "S-1-5-21-1-2-3-1001",
+                "usage_guard_username": "nicklaus",
+                "windows_identity_mapped": True,
+            }
+            aggregate_key = "site:brave.exe:other-sites"
+            neighboring_key = "site:brave.exe:other-sites-extra"
+            store.update_sessions({
+                "active:aggregate": {
+                    "kind": "active", "key": aggregate_key,
+                    "label": "Autres sites",
+                },
+                "active:neighbor": {
+                    "kind": "active", "key": neighboring_key,
+                    "label": "Other sites extra",
+                },
+            }, at="2026-09-03T08:00:00+02:00")
+
+            store.update_sessions({}, at="2026-09-03T08:01:00+02:00")
+
+            pending = store.pending_backend_activity_intervals()["intervals"]
+            self.assertEqual(
+                {item["key"] for item in pending},
+                {aggregate_key, neighboring_key},
+            )
+            self.assertEqual(
+                [item["key"] for item in store.data["sessions"]],
+                [neighboring_key],
+            )
+            self.assertEqual(
+                [item["key"] for item in store._recent_closed_sessions],
+                [aggregate_key, neighboring_key],
+            )
+            store.save(force=True)
+            self.assertEqual(
+                [item["key"] for item in AppUsageStore(path).data["sessions"]],
+                [neighboring_key],
+            )
+
+    def test_other_sites_closure_without_usage_interval_remains_archived(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            aggregate_key = "site:brave.exe:other-sites"
+            store.update_sessions({
+                "active:aggregate": {
+                    "kind": "active", "key": aggregate_key,
+                    "label": "Autres sites",
+                },
+            }, at="2026-09-03T08:00:00+02:00")
+
+            store.update_sessions({}, at="2026-09-03T08:01:00+02:00")
+
+            self.assertEqual(
+                [item["key"] for item in store.data["sessions"]],
+                [aggregate_key],
+            )
+            self.assertEqual(
+                [item["key"] for item in store._recent_closed_sessions],
+                [aggregate_key],
+            )
+            self.assertEqual(
+                store.pending_backend_activity_intervals()["intervals"], [],
+            )
+
+    def test_other_sites_session_migration_preserves_usage_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "activity.json"
+            store = AppUsageStore(path)
+            aggregate_key = "site:brave.exe:other-sites"
+            neighboring_key = "site:brave.exe:other-sites-extra"
+            opened = datetime.now().astimezone() - timedelta(days=1)
+            closed = opened + timedelta(minutes=1)
+            day = opened.date().isoformat()
+            identity = {
+                "windows_sid": "S-1-5-21-1-2-3-1001",
+                "usage_guard_username": "nicklaus",
+                "windows_identity_mapped": True,
+            }
+            common = {
+                **identity, "kind": "active",
+                "started_at": opened.isoformat(timespec="seconds"),
+                "ended_at": closed.isoformat(timespec="seconds"),
+            }
+            store.data["days"] = {
+                day: {aggregate_key: 60.0},
+            }
+            store.data["other_site_days"] = {
+                "brave.exe": {day: {"example.org": 60.0}},
+            }
+            store.data["sessions"] = [
+                {
+                    **common, "id": "active:aggregate", "key": aggregate_key,
+                    "label": "Autres sites",
+                },
+                {
+                    **common, "id": "active:neighbor", "key": neighboring_key,
+                    "label": "Other sites extra",
+                },
+            ]
+            store.data["backend_activity_backfill_version"] = 0
+            self.assertFalse(store._purge_synthetic_other_sites_sessions())
+            self.assertEqual(len(store.data["sessions"]), 2)
+            store._dirty = True
+            store.save(force=True)
+            aggregate_id = store._activity_sqlite.pending_daily_aggregates()[0][
+                "aggregate_id"
+            ]
+
+            migrated = AppUsageStore(path)
+            first_outbox = migrated.pending_backend_activity_intervals()[
+                "intervals"
+            ]
+            self.assertEqual(
+                [item["key"] for item in migrated.data["sessions"]],
+                [neighboring_key],
+            )
+            self.assertEqual(
+                migrated.data["days"],
+                {day: {aggregate_key: 60.0}},
+            )
+            self.assertEqual(
+                migrated.data["other_site_days"],
+                {"brave.exe": {day: {"example.org": 60.0}}},
+            )
+            self.assertEqual(
+                {item["key"] for item in first_outbox},
+                {aggregate_key, neighboring_key},
+            )
+            self.assertEqual(
+                migrated._activity_sqlite.pending_daily_aggregates()[0][
+                    "aggregate_id"
+                ],
+                aggregate_id,
+            )
+
+            restarted = AppUsageStore(path)
+            second_outbox = restarted.pending_backend_activity_intervals()[
+                "intervals"
+            ]
+            self.assertEqual(restarted.data["sessions"], migrated.data["sessions"])
+            self.assertEqual(
+                [item["record_id"] for item in second_outbox],
+                [item["record_id"] for item in first_outbox],
+            )
+            self.assertEqual(restarted.data["days"], migrated.data["days"])
+            self.assertEqual(
+                restarted.data["other_site_days"],
+                migrated.data["other_site_days"],
+            )
+
+    def test_failed_compaction_replays_duplicates_instead_of_losing_tail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            self.assertTrue(store._append_backend_activity_interval(
+                self._session("app:first", 0),
+            ))
+            self.assertTrue(store._append_backend_activity_interval(
+                self._session("app:second", 1),
+            ))
+            page = store.pending_backend_activity_intervals(max_items=1)
+            original_replace = Path.replace
+
+            def fail_outbox_replace(path, target):
+                if Path(path) == store.activity_outbox_path.with_suffix(".tmp"):
+                    raise PermissionError("simulated locked JSONL")
+                return original_replace(path, target)
+
+            with patch.object(Path, "replace", fail_outbox_replace):
+                with self.assertRaisesRegex(PermissionError, "locked JSONL"):
+                    store.acknowledge_backend_activity_intervals(page["cursor"])
+
+            self.assertEqual(
+                json.loads(store.activity_outbox_state_path.read_text(
+                    encoding="utf-8",
+                )),
+                {"cursor": 0},
+            )
+            replay = store.pending_backend_activity_intervals()["intervals"]
+            self.assertEqual(
+                [item["key"] for item in replay],
+                ["app:first", "app:second"],
+            )
+
+    def test_cursor_is_durably_zero_before_compacted_tail_is_published(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            self.assertTrue(store._append_backend_activity_interval(
+                self._session("app:first", 0),
+            ))
+            self.assertTrue(store._append_backend_activity_interval(
+                self._session("app:second", 1),
+            ))
+            page = store.pending_backend_activity_intervals(max_items=1)
+            # Model a cursor written by a previous runtime where compaction
+            # could fail independently from cursor advancement.
+            store.activity_outbox_state_path.write_text(
+                json.dumps({"cursor": page["cursor"]}), encoding="utf-8",
+            )
+            remaining = store.pending_backend_activity_intervals(max_items=1)
+            original_replace = Path.replace
+            observed = []
+
+            def inspect_outbox_replace(path, target):
+                if Path(path) == store.activity_outbox_path.with_suffix(".tmp"):
+                    observed.append(json.loads(
+                        store.activity_outbox_state_path.read_text(
+                            encoding="utf-8",
+                        )
+                    )["cursor"])
+                return original_replace(path, target)
+
+            with patch.object(Path, "replace", inspect_outbox_replace):
+                store.acknowledge_backend_activity_intervals(
+                    remaining["cursor"],
+                )
+
+            self.assertEqual(observed, [0])
+            self.assertEqual(
+                store.pending_backend_activity_intervals()["intervals"], [],
+            )
+
+    def test_ack_compaction_cannot_drop_a_concurrent_append(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            identity = {
+                "windows_sid": "S-1-5-21-1-2-3-1001",
+                "usage_guard_username": "nicklaus",
+                "windows_identity_mapped": True,
+            }
+
+            def session(key, minute):
+                return {
+                    **identity,
+                    "id": f"active:{key}", "kind": "active", "key": key,
+                    "label": key,
+                    "started_at": f"2026-08-30T08:{minute:02d}:00+02:00",
+                    "ended_at": f"2026-08-30T08:{minute:02d}:30+02:00",
+                }
+
+            first = session("app:first", 0)
+            second = session("app:second", 1)
+            self.assertTrue(store._append_backend_activity_interval(first))
+            cursor = store.pending_backend_activity_intervals()["cursor"]
+
+            replace_entered = threading.Event()
+            allow_replace = threading.Event()
+            append_finished = threading.Event()
+            original_replace = Path.replace
+
+            def delayed_replace(path, target):
+                if Path(path) == store.activity_outbox_path.with_suffix(".tmp"):
+                    replace_entered.set()
+                    self.assertTrue(allow_replace.wait(2))
+                return original_replace(path, target)
+
+            acknowledger = threading.Thread(
+                target=store.acknowledge_backend_activity_intervals,
+                args=(cursor,),
+            )
+            appender = threading.Thread(target=lambda: (
+                store._append_backend_activity_interval(second),
+                append_finished.set(),
+            ))
+            with patch.object(Path, "replace", delayed_replace):
+                acknowledger.start()
+                self.assertTrue(replace_entered.wait(2))
+                appender.start()
+                self.assertFalse(append_finished.wait(0.1))
+                allow_replace.set()
+                acknowledger.join(2)
+                appender.join(2)
+
+            self.assertFalse(acknowledger.is_alive())
+            self.assertFalse(appender.is_alive())
+            self.assertTrue(append_finished.is_set())
+            pending = store.pending_backend_activity_intervals()["intervals"]
+            self.assertEqual([item["key"] for item in pending], ["app:second"])
+
+    def test_windows_session_and_system_event_use_same_durable_timeline_outbox(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            identity = {
+                "windows_sid": "S-1-5-21-1-2-3-1001",
+                "usage_guard_username": "nicklaus",
+                "windows_identity_mapped": True,
+            }
+            store._active_windows_identity = identity
+            store.data["windows_sessions"] = [{
+                **identity,
+                "started_at": "2026-08-29T23:50:00+02:00",
+                "ended_at": None,
+            }]
+
+            store.record_system_event(
+                "shutdown", at="2026-08-30T00:20:00+02:00",
+            )
+            store.close_windows_session("2026-08-30T00:20:00+02:00")
+
+            kinds = {
+                item["kind"]
+                for item in store.pending_backend_activity_intervals()["intervals"]
+            }
+            self.assertEqual(kinds, {"system_event", "windows_session"})
+
+    def test_outbox_write_failure_keeps_session_open_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store._active_windows_identity = {
+                "windows_sid": "S-1-5-21-1-2-3-1001",
+                "windows_identity_mapped": True,
+            }
+            store.update_sessions({
+                "active": {"kind": "active", "key": "app:kona"},
+            }, at="2026-08-30T08:00:00+02:00")
+
+            with patch.object(
+                store, "_append_backend_activity_interval", return_value=False,
+            ), self.assertRaisesRegex(OSError, "journaliser"):
+                store.update_sessions({}, at="2026-08-30T08:01:00+02:00")
+
+            self.assertIn("active", store.data["open_sessions"])
+            self.assertFalse(any(
+                item.get("key") == "app:kona"
+                for item in store.data["sessions"]
+            ))
+
+    def test_only_new_closures_enter_bounded_outbox_without_serializing_archive(self):
+        class ArchiveMustNotBeSerialized(dict):
+            def __deepcopy__(self, _memo):
+                raise AssertionError("500 MB archive was copied")
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["days"] = ArchiveMustNotBeSerialized({
+                "1900-01-01": {"app:legacy": 500_000_000},
+            })
+            store._active_windows_identity = {
+                "windows_sid": "S-1-5-21-1-2-3-1001",
+                "windows_identity_mapped": True,
+                "windows_session_id": 7,
+            }
+            opened = "2026-08-29T23:55:00+02:00"
+            closed = "2026-08-30T00:05:00+02:00"
+            store.update_sessions({
+                "active": {"kind": "active", "key": "app:kona", "label": "Kona"},
+                "program": {"kind": "program", "key": "app:kona", "label": "Kona"},
+                "web": {"kind": "web", "key": "site:brave:example", "label": "example"},
+                "media": {"kind": "multimedia", "key": "passive:radio", "label": "Radio"},
+            }, at=opened)
+            store.update_sessions({}, at=closed)
+
+            page = store.pending_backend_activity_intervals()
+
+            self.assertEqual(len(page["intervals"]), 4)
+            self.assertLessEqual(page["bytes"], 512 * 1024)
+            self.assertEqual(
+                {item["kind"] for item in page["intervals"]},
+                {"active", "program", "web", "multimedia"},
+            )
+            active = next(
+                item for item in page["intervals"] if item["kind"] == "active"
+            )
+            self.assertIn("interval_id", active)
+            self.assertEqual(active["started_at"], opened)
+            self.assertEqual(active["ended_at"], closed)
+            self.assertTrue(all(
+                "record_id" in item for item in page["intervals"]
+            ))
+
+    def test_cursor_ack_does_not_backfill_preexisting_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppUsageStore(Path(directory) / "activity.json")
+            store.data["sessions"] = [{
+                "kind": "active", "key": "app:legacy",
+                "started_at": "2020-01-01T00:00:00+01:00",
+                "ended_at": "2020-01-01T00:01:00+01:00",
+            }] * 100_000
+
+            self.assertEqual(
+                store.pending_backend_activity_intervals()["intervals"], [],
+            )
+
+            store._active_windows_identity = {
+                "windows_sid": "S-1-5-21-1-2-3-1001",
+                "windows_identity_mapped": True,
+            }
+            store.update_sessions({
+                "active": {"kind": "active", "key": "app:new"},
+            }, at="2026-08-30T08:00:00+02:00")
+            store.update_sessions({}, at="2026-08-30T08:01:00+02:00")
+            page = store.pending_backend_activity_intervals(max_items=1)
+            store.acknowledge_backend_activity_intervals(page["cursor"])
+
+            self.assertEqual(
+                store.pending_backend_activity_intervals()["intervals"], [],
             )
 
 

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Usage Guard · Banner</title>
+  <style>
+    :root{font:15px system-ui,sans-serif;color:#17201e;background:#f3f5f4}body{max-width:680px;margin:0 auto;padding:32px 20px}main{display:grid;gap:18px;padding:24px;border:1px solid #ccd5d2;border-radius:12px;background:white;box-shadow:0 12px 36px #18332b16}h1{margin:0;font-size:24px}p{margin:0;color:#66726f}label{display:grid;gap:7px;font-weight:700}select,input{min-height:40px;padding:7px 10px;border:1px solid #aebbb7;border-radius:7px;background:white;color:inherit}.row{display:grid;grid-template-columns:1fr 1fr;gap:14px}.hint{font-size:12px;font-weight:400;color:#66726f}.conditional{display:grid;gap:14px}.conditional[hidden]{display:none}#status{min-height:20px;color:#0f766e;font-weight:700}@media(max-width:560px){.row{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <main>
+    <h1 data-i18n="optionsHeading">Usage Guard banner</h1>
+    <p data-i18n="optionsDescription">These settings control the reminder shown before a limit is reached. Once the limit is reached, the banner and exceptional extension remain visible.</p>
+    <label><span data-i18n="displayLabel">Display</span>
+      <select id="mode">
+        <option value="warning" data-i18n="displayWarning">Only when approaching the limit</option>
+        <option value="periodic" data-i18n="displayPeriodic">Periodic reminder</option>
+        <option value="always" data-i18n="displayAlways">Always visible</option>
+        <option value="hidden" data-i18n="displayHidden">Hidden before blocking</option>
+      </select>
+    </label>
+    <div class="row">
+      <label><span data-i18n="positionLabel">Position</span><select id="position"><option value="top" data-i18n="positionTop">Top</option><option value="bottom" data-i18n="positionBottom">Bottom</option></select></label>
+      <label><span data-i18n="opacityLabel">Background opacity</span><input id="opacity" type="range" min="15" max="100" step="1"><span id="opacity-value" class="hint"></span></label>
+    </div>
+    <div id="warning-settings" class="conditional">
+      <label><span data-i18n="warningSecondsLabel">Advance warning (seconds)</span><input id="warningSeconds" type="number" min="1" max="86400"></label>
+    </div>
+    <div id="periodic-settings" class="row conditional">
+      <label><span data-i18n="periodicEveryLabel">Reminder interval (seconds)</span><input id="periodicEverySeconds" type="number" min="30" max="86400"></label>
+      <label><span data-i18n="periodicDurationLabel">Reminder duration (seconds)</span><input id="periodicVisibleSeconds" type="number" min="3" max="300"></label>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

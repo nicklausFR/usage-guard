@@ -41,7 +41,7 @@
     const fill = document.createElement("div");
     const extensionButton = document.createElement("button");
     const blockOverlay = document.createElement("div");
-    text.textContent = "Usage Guard — Attention à ne pas y passer trop de temps sur ce site.";
+    text.textContent = "Usage Guard — Be mindful of how much time you spend on this website.";
     reminder.setAttribute("role", "status");
     reminder.style.cssText = [
       "position:fixed", "z-index:2147483647", "top:0", "left:0", "right:0",
@@ -52,7 +52,7 @@
     countdown.style.cssText = "float:right; color:#ffb3b3; font-variant-numeric:tabular-nums;";
     progress.style.cssText = "height:5px; margin-top:9px; overflow:hidden; border-radius:99px; background:#7a3035;";
     fill.style.cssText = "height:100%; width:0%; background:#ff5a5f; transition:width .5s linear;";
-    extensionButton.textContent = "Obtenir une rallonge exceptionnelle de 1 min";
+    extensionButton.textContent = "Get a one-time 1 min extension";
     extensionButton.style.cssText = [
       "display:none", "float:right", "margin:-5px 0 0 14px", "padding:5px 10px",
       "border:1px solid #ffb3b3", "border-radius:5px", "background:#7a2026",
@@ -79,7 +79,7 @@
       countdown.textContent = `${minutes}:${seconds}`;
       fill.style.width = `${(elapsed / periodSeconds) * 100}%`;
       if (remaining === 0) {
-        text.textContent = "Usage Guard — Le temps est écoulé. Faites une pause.";
+        text.textContent = "Usage Guard — Time is up. Take a break.";
         fill.style.background = "#ef5350";
         blockOverlay.style.display = "block";
         if (!extensionUsed) extensionButton.style.display = "inline-block";
@@ -99,7 +99,7 @@
       extensionUsed = true;
       periodSeconds = 60;
       remainingSeconds = periodSeconds;
-      text.textContent = "Usage Guard — Rallonge exceptionnelle en cours.";
+      text.textContent = "Usage Guard — One-time extension in progress.";
       fill.style.background = "#ff5a5f";
       extensionButton.style.display = "none";
       blockOverlay.style.display = "none";

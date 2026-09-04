@@ -4,22 +4,25 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#f3f5f4">
-  <script>try{const choice=localStorage.getItem("usage-guard-theme")||"auto",dark=choice==="dark"||(choice==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light"}catch{}</script>
+  <script>try{const choice=localStorage.getItem("usage-guard-theme")||"light",dark=choice==="dark"||(choice==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light"}catch{}</script>
   <link rel="manifest" href="manifest.json">
   <link rel="icon" type="image/png" sizes="192x192" href="usage-guard-192.png">
   <link rel="apple-touch-icon" href="usage-guard-192.png">
-  <link rel="stylesheet" href="style.css?v=1.075">
-  <title>Usage Guard</title>
+  <link rel="stylesheet" href="style.css?v=1.132">
+  <title>Usage Guard v1.0</title>
 </head>
-<body>
-  <section id="auth-screen" class="auth-screen" hidden>
+<body class="auth-required auth-pending">
+  <section id="auth-screen" class="auth-screen">
     <div class="auth-card">
-      <div class="brand auth-brand"><span class="brand-mark">UG</span><div><strong>Usage Guard</strong><small>Accès distant sécurisé</small></div></div>
-      <form id="login-form">
+      <div class="brand auth-brand"><span class="brand-mark">UG</span><strong>Usage Guard <span class="brand-version">v1.0</span></strong></div>
+      <div id="auth-session-check" class="auth-session-check" role="status" aria-live="polite"><i aria-hidden="true"></i><strong>Vérification de la session…</strong><small>L’interface reste protégée pendant la connexion au serveur.</small></div>
+      <form id="login-form" hidden>
         <h1>Connexion</h1>
         <label>Identifiant<input name="username" autocomplete="username" maxlength="32" required autofocus></label>
         <label>Mot de passe<input name="password" type="password" autocomplete="current-password" required></label>
+        <p id="local-windows-login-note" hidden>Laissez le mot de passe vide pour ouvrir la session Windows proposée. Saisissez des identifiants Usage Guard pour vous connecter avec un autre compte, notamment administrateur.</p>
         <p class="form-error" id="login-error" role="alert"></p>
+        <p id="login-progress" class="auth-progress" role="status" aria-live="polite" hidden><i aria-hidden="true"></i><span>Connexion au serveur…</span></p>
         <button type="submit" class="primary">Se connecter</button>
       </form>
       <form id="first-password-form" hidden>
@@ -31,47 +34,85 @@
         <p class="form-error" id="first-password-error" role="alert"></p>
         <button type="submit" class="primary">Enregistrer</button>
       </form>
+      <form id="first-email-form" hidden>
+        <h1>Renseigner votre e-mail</h1>
+        <p>Cette adresse est associée à votre compte Usage Guard.</p>
+        <label>Adresse e-mail<input name="email" type="email" autocomplete="email" maxlength="254" required></label>
+        <p class="form-error" id="first-email-error" role="alert"></p>
+        <button type="submit" class="primary">Enregistrer</button>
+      </form>
     </div>
   </section>
 
   <header class="topbar">
-    <div class="brand"><span class="brand-mark">UG</span><strong>Usage Guard</strong></div>
+    <div class="brand"><span class="brand-mark">UG</span><strong>Usage Guard <span class="brand-version">v1.0</span></strong><span id="runtime-profile-badge" class="runtime-profile-badge" hidden>DEV</span></div>
     <div id="header-account" class="header-account" hidden><strong id="header-username"></strong><button id="header-logout">Se déconnecter</button></div>
   </header>
 
   <main>
     <nav class="tabs" aria-label="Sections">
-      <button class="active" data-tab="today">Dernière session Windows</button>
+      <button class="active" data-tab="today">Activités du jour</button>
+      <button data-tab="activity-details">Classement</button>
       <button data-tab="analysis">Analyse</button>
       <button data-tab="limits">Limites</button>
       <button data-tab="notifications">Notifications</button>
       <button data-tab="settings">Paramètres</button>
     </nav>
 
+    <div id="limit-person-scope" class="limit-person-scope person-view-scope" hidden>
+      <label class="person-scope-control"><span>Personne à limiter</span><select id="limit-person-choice" aria-label="Personne à limiter"></select></label>
+      <div id="person-device-scope" class="person-device-scope" hidden>
+        <span class="scope-control-label" id="person-device-label">Ordinateurs</span>
+        <details id="person-device-menu" class="scope-checklist">
+          <summary id="person-device-summary">Ordinateurs sélectionnés</summary>
+          <div id="person-device-list" class="scope-checklist-options" role="group" aria-labelledby="person-device-label"></div>
+        </details>
+      </div>
+    </div>
+
     <section id="today" class="panel active">
+      <p id="today-loading" class="panel-loading" role="status" aria-live="polite" hidden><i aria-hidden="true"></i><span>Chargement des activités…</span></p>
       <div class="today-session-strip">
-        <div><strong id="today-session-date">—</strong><small>Sessions Windows du jour</small></div>
-        <div id="today-session-list" class="session-picker" role="listbox" aria-label="Sessions Windows du jour"></div>
+        <div id="today-session-list" class="session-picker" role="listbox" aria-label="Sessions du jour"></div>
+        <div id="session-summary" class="session-summary" hidden aria-hidden="true">
+          <div class="session-summary-head"><strong id="today-session-title">—</strong><span id="on-time">—</span></div>
+          <div id="session-total-track" class="session-total-track inactive" data-current-state="Inactif" aria-label="Répartition de la session"><i id="active-share"></i><i id="absence-share"></i><i id="sleep-share"></i><i id="offline-share"></i></div>
+          <div class="session-total-legend"><span><i class="active"></i>Présence + activité <b id="active-time">—</b></span><span class="uncolored-state">Inactif <b id="absence-time">—</b></span><span class="uncolored-state">Veille <b id="sleep-time">—</b></span><span class="uncolored-state">PC arrêté / suivi indisponible <b id="offline-time">—</b></span></div>
+          <div class="session-summary-foot"><time id="session-start">—</time><time id="session-end">—</time></div><span id="today-date" hidden></span>
+        </div>
       </div>
-      <div class="session-summary">
-        <div class="session-summary-head"><strong id="today-session-title">Session en cours</strong><span id="on-time">—</span></div>
-        <div class="session-total-track" aria-label="Répartition de la session Windows"><i id="active-share"></i><i id="passive-share"></i><i id="absence-share"></i></div>
-        <div class="session-total-legend"><span><i class="active"></i>Actif <b id="active-time">—</b></span><span><i class="passive"></i>Passif <b id="passive-time">—</b></span><span><i class="absence"></i>Absence <b id="absence-time">—</b></span></div>
-        <div class="session-summary-foot"><time id="session-start">—</time><time id="session-end">—</time></div><span id="today-date" hidden></span>
+      <section id="session-chronology" class="session-chronology" aria-label="Frise chronologique de la session">
+        <div id="today-sessions" class="activity-list"></div>
+      </section>
+    </section>
+
+    <section id="activity-details" class="panel">
+      <p id="classification-loading" class="panel-loading" role="status" aria-live="polite" hidden><i aria-hidden="true"></i><span>Chargement du classement…</span></p>
+      <div class="catalog-toolbar">
+        <label class="catalog-person-control" for="catalog-person-choice"><strong>Catalogue des activités de</strong><select id="catalog-person-choice" aria-label="Personne à limiter"></select></label>
+        <button id="catalog-add" type="button" class="primary">Ajouter</button>
       </div>
+      <form id="catalog-search-form" class="catalog-search" role="search">
+        <label for="catalog-search">Rechercher dans le classement</label>
+        <div>
+          <input id="catalog-search" type="search" list="catalog-search-options" placeholder="Catégorie, application ou site" autocomplete="off">
+          <datalist id="catalog-search-options"></datalist>
+          <button type="submit">Afficher</button>
+        </div>
+      </form>
       <div id="today-usage" class="usage-tree"></div>
-      <div class="section-head session-head"><div><p class="eyebrow">Chronologie relative</p><h2 id="run-timeline-title">Dernière session Windows</h2></div></div>
-      <div id="session-recording" class="recording-status" role="status"><span class="pulse"></span><div><strong>Initialisation du journal horaire…</strong><small>Détection des applications visibles et des sessions multimédias</small></div></div>
-      <div id="today-sessions" class="activity-list"></div>
     </section>
 
     <section id="analysis" class="panel">
-      <div class="progressive-action panel-action-menu">
+      <p id="analysis-loading" class="panel-loading" role="status" aria-live="polite" hidden><i aria-hidden="true"></i><span>Chargement de l’analyse…</span></p>
+      <div class="progressive-action panel-action-menu" hidden>
         <button id="new-analysis" class="primary" aria-expanded="false" aria-controls="analysis-type-menu">Faire une analyse</button>
         <div id="analysis-type-menu" class="choice-list" hidden>
           <button class="choice-back" data-workflow-cancel="analysis"><strong>← Retour</strong></button>
-          <button data-analysis-type="stats"><strong>Par jour</strong><small>Total, moyenne et détail par application ou catégorie</small></button>
+          <button data-analysis-type="stats"><strong>Par usage</strong><small>Catégories, applications, Internet et multimédia</small></button>
+          <button data-analysis-type="catalog"><strong>Classement comparatif</strong><small>Comparer jours utilisés, activité, ouverture, présence et lancements</small></button>
           <button data-analysis-type="hours"><strong>Horaires du PC</strong><small>Débuts, fins et durées des sessions Windows</small></button>
+          <button data-analysis-type="timeline"><strong>Par frise</strong><small>Présence colorée et zones d’absence neutres sur une journée</small></button>
         </div>
       </div>
       <section id="analysis-stats-panel" class="analysis-section stats-section progressive-panel" hidden>
@@ -100,23 +141,33 @@
           <div id="analysis-stats-chart" class="history-chart stats-chart"></div>
         </div>
       </section>
+      <section id="analysis-catalog-panel" class="analysis-section progressive-panel" hidden>
+        <form id="analysis-catalog-controls" class="analysis-catalog-controls">
+          <div id="analysis-person-scope-slot" class="analysis-person-scope-slot"></div>
+          <label>Du<input id="analysis-catalog-start" type="date" required></label>
+          <label>Au<input id="analysis-catalog-end" type="date" required></label>
+          <label class="analysis-catalog-unclassified"><input id="analysis-catalog-hide-unclassified" type="checkbox"> Masquer les applications non classées</label>
+        </form>
+        <div id="analysis-catalog-results" class="analysis-catalog-table"></div>
+      </section>
       <section id="analysis-hours-panel" class="analysis-section progressive-panel" hidden>
         <button class="analysis-back" data-analysis-back="types">← Retour</button>
         <div id="analysis-hours-summary" class="stats-summary"></div>
         <div id="analysis-hours-list" class="session-hours-list"></div>
       </section>
       <section id="analysis-timeline-panel" class="analysis-section progressive-panel" hidden>
-        <div id="analysis-session-menu" class="choice-list analysis-choice-list"></div>
-        <div id="analysis-classification-menu" class="choice-list analysis-choice-list" hidden></div>
+        <div id="analysis-day-menu" class="choice-list analysis-choice-list"></div>
+        <div id="analysis-timeline-target-menu" class="choice-list analysis-choice-list" hidden></div>
         <div id="analysis-sessions" class="activity-list" hidden></div>
       </section>
       <section class="analysis-section history-overview">
-        <div class="analysis-title"><h2>Temps actif</h2><div class="zoom-controls"><button id="history-zoom-in" title="Afficher moins de jours" aria-label="Zoom avant">＋</button><span id="history-range">7 jours</span><button id="history-zoom-out" title="Afficher plus de jours" aria-label="Zoom arrière">−</button><button id="history-zoom-all">Tout</button></div></div>
+        <div class="analysis-title"><label class="history-toggle"><input id="history-chart-enabled" type="checkbox" checked><span>Histogramme par jour</span></label><h2 id="history-title">Activité par jour · Toutes les activités</h2><div class="zoom-controls" hidden><button id="history-zoom-in" title="Afficher moins de jours" aria-label="Zoom avant">＋</button><span id="history-range">—</span><button id="history-zoom-out" title="Afficher plus de jours" aria-label="Zoom arrière">−</button><button id="history-zoom-all">Tout</button></div></div>
         <div id="history-chart" class="history-chart"></div>
       </section>
     </section>
 
     <section id="limits" class="panel">
+      <p id="limits-loading" class="panel-loading compact-loading" role="status" aria-live="polite" hidden><i aria-hidden="true"></i><span>Chargement des limites…</span></p>
       <div id="limit-create" class="progressive-action panel-action-menu">
         <button id="new-limit" class="primary" aria-expanded="false" aria-controls="limit-type-menu">Nouvelle limitation</button>
         <div id="limit-type-menu" class="choice-list analysis-choice-list" hidden></div>
@@ -183,19 +234,23 @@
     </section>
 
     <section id="notifications" class="panel">
+      <div id="notification-owner-scope" class="limit-person-scope notification-owner-scope" hidden>
+        <label>Afficher<select id="notification-owner-choice" aria-label="Propriétaire des notifications"></select></label>
+      </div>
+      <p id="notifications-loading" class="panel-loading compact-loading" role="status" aria-live="polite" hidden><i aria-hidden="true"></i><span>Chargement des notifications…</span></p>
       <div id="notification-create" class="progressive-action panel-action-menu">
         <button id="new-notification" class="primary" aria-expanded="false" aria-controls="notification-type-menu">Nouvelle notification</button>
         <div id="notification-type-menu" class="choice-list compact-choice-list" hidden>
           <button class="choice-back" data-workflow-cancel="notification"><strong>← Retour</strong></button>
-          <button data-notification-type="limited_app_start"><strong>Au démarrage d’une application limitée</strong></button>
-          <button data-notification-type="limit_change"><strong>Si une limite est ajoutée ou modifiée</strong></button>
-          <button data-notification-type="limit_warning"><strong>Prévenir avant la limite</strong></button>
-          <button data-notification-type="limit_extension"><strong>Si une limite est dépassée avec le joker</strong></button>
-          <button data-notification-type="computer_block_change"><strong>Si une limitation de l’ordinateur est modifiée</strong></button>
-          <button data-notification-type="pwa_login"><strong>Si quelqu’un se connecte à la PWA</strong></button>
-          <button data-notification-type="client_connected"><strong>Si le client se connecte</strong></button>
-          <button data-notification-type="client_disconnected"><strong>Si le client se déconnecte</strong></button>
-          <button data-notification-type="usage_threshold"><strong>Au dépassement d’un seuil</strong></button>
+          <button data-notification-type="limit_change"><strong>Limite ajoutée ou modifiée</strong></button>
+          <button data-notification-type="limit_warning"><strong>Préavis avant limite</strong></button>
+          <button data-notification-type="limit_reached"><strong>Limite atteinte</strong></button>
+          <button data-notification-type="pwa_login"><strong>Connexion à l’interface de gestion</strong></button>
+          <button data-notification-type="limit_override_login"><strong>Déverrouillage administrateur pendant une limitation</strong><small>Authentification depuis l’écran de blocage</small></button>
+          <button data-notification-type="access_change"><strong>Changement de droits d’un utilisateur</strong><small>Rôle, autorisations et ordinateurs affectés</small></button>
+          <button data-notification-type="computer_state"><strong>Ordinateur allumé, éteint ou en veille</strong></button>
+          <button data-notification-type="usage_threshold"><strong>Programme, site ou catégorie utilisé</strong></button>
+          <button data-notification-type="protection_interrupted"><strong>Tentative de bidouille</strong><small>Protection, systray, extension ou service interrompu</small></button>
         </div>
       </div>
       <div id="notification-workflow" class="inline-workflow" hidden>
@@ -245,6 +300,13 @@
         </form>
         <div id="notification-weekdays-menu" class="choice-list analysis-choice-list" hidden></div>
         <div id="notification-warning-menu" class="choice-list analysis-choice-list" hidden></div>
+        <div id="notification-login-role-menu" class="choice-list analysis-choice-list" hidden>
+          <button class="choice-back" data-notification-back="types"><strong>← Retour</strong></button>
+          <p class="choice-heading">Comptes à surveiller</p>
+          <button data-notification-login-role="users"><strong>Tous les utilisateurs</strong><small>Comptes non administrateurs</small></button>
+          <button data-notification-login-role="admins"><strong>Tous les administrateurs</strong><small>Comptes administrateurs</small></button>
+          <button data-notification-login-role="both"><strong>Utilisateurs et administrateurs</strong><small>Tous les comptes</small></button>
+        </div>
         <form id="notification-warning-form" class="workflow-input-form" hidden>
           <label id="notification-warning-label" for="notification-warning-value">Prévenir avant la limite</label>
           <div class="duration-fields">
@@ -258,9 +320,8 @@
           <button type="button" data-notification-back="delivery-previous">← Retour</button>
           <h3>Mode de notification</h3>
           <div class="notification-channel-options">
-            <label><input type="radio" name="delivery" value="windows"> Notification Windows</label>
-            <label><input type="radio" name="delivery" value="email"> E-mail</label>
-            <label><input type="radio" name="delivery" value="both"> Les deux</label>
+            <label><input type="checkbox" name="delivery" value="windows" checked> Windows</label>
+            <label><input type="checkbox" name="delivery" value="email"> E-mail</label>
           </div>
           <label id="notification-email-recipient-label">Adresse destinataire<input id="notification-email-recipient" name="email_recipient" type="email" autocomplete="email"></label>
           <button type="submit" class="primary">Enregistrer</button>
@@ -270,7 +331,16 @@
     </section>
 
     <section id="settings" class="panel settings-sections">
+      <div id="settings-menu" class="choice-list analysis-choice-list settings-menu">
+        <button data-settings-page="general"><strong>Interface</strong><small>Langue, thème et couleurs</small></button>
+        <button data-settings-page="defaults"><strong>Valeurs par défaut</strong><small>Préavis appliqué aux nouvelles limitations</small></button>
+        <button data-settings-page="users"><strong>Comptes et utilisateurs</strong><small>Profil, e-mails, rôles et droits</small></button>
+        <button data-settings-page="email"><strong>Envoi d’e-mails</strong><small>Serveur SMTP et personnalisation des messages</small></button>
+        <button data-settings-page="backup"><strong>Sauvegarde du serveur</strong><small>Télécharger une copie SQLite cohérente</small></button>
+        <button data-settings-page="backend"><strong>Version et mise à jour</strong><small>Version installée, version disponible et synchronisation</small></button>
+      </div>
       <section id="general-settings-section" class="settings-section" aria-labelledby="general-settings-title">
+        <button class="settings-back" data-settings-back>← Paramètres</button>
         <h2 id="general-settings-title">Options générales</h2>
         <div class="settings-card">
         <label for="language-choice"><strong>Langue</strong><small>Langue du programme principal</small></label>
@@ -286,12 +356,10 @@
           <option value="dark">Sombre</option>
           <option value="light">Clair</option>
         </select>
-        <div class="settings-subheading"><strong>Couleurs</strong><small>Barres, absences et inactivité</small></div>
-        <label for="color-progress"><strong>Progression</strong><small>Temps actif et limites normales</small></label>
+        <div class="settings-subheading"><strong>Couleurs</strong><small>Présence, progression et alertes</small></div>
+        <label for="color-progress"><strong>Activité</strong><small>Présence avec activité et limites normales</small></label>
         <input id="color-progress" type="color" value="#0f766e">
-        <label for="color-absence"><strong>Absence</strong><small>Temps sans activité détectée</small></label>
-        <input id="color-absence" type="color" value="#8a9390">
-        <label for="color-inactive"><strong>Inactivité</strong><small>Ouvert, non actif</small></label>
+        <label for="color-inactive"><strong>Présence</strong><small>Présence sans l’activité sélectionnée</small></label>
         <input id="color-inactive" type="color" value="#84918f">
         <label for="color-warning"><strong>Alerte</strong><small>Joker et 10 derniers %</small></label>
         <input id="color-warning" type="color" value="#f59e0b">
@@ -299,9 +367,11 @@
         </div>
       </section>
       <section id="email-settings-section" class="settings-section" aria-labelledby="email-settings-title">
+        <button class="settings-back" data-settings-back>← Paramètres</button>
         <h2 id="email-settings-title">Notifications par e-mail</h2>
         <div class="settings-card email-settings-card">
           <form id="email-settings-form">
+            <h3>Configuration SMTP</h3>
             <div class="email-settings-grid">
               <label>Serveur SMTP<input name="smtp_host" autocomplete="off" placeholder="smtp.example.fr"></label>
               <label>Port<input name="smtp_port" type="number" min="1" max="65535" value="587" required></label>
@@ -312,42 +382,76 @@
             </div>
             <p id="email-settings-status" role="status"></p>
             <div class="email-settings-actions">
-              <button type="submit" class="primary">Enregistrer</button>
+              <button type="submit" class="primary">Enregistrer le serveur SMTP</button>
               <button id="test-email-settings" type="button">Tester</button>
+            </div>
+          </form>
+          <form id="email-message-settings-form" class="email-template-settings">
+            <h3>Personnalisation des messages</h3>
+            <p>Ces modèles s’appliquent à tous les e-mails, en PWA locale comme distante. Laissez un champ vide pour conserver le texte automatique. Les variables <code>{titre}</code> et <code>{message}</code> insèrent les détails générés par Usage Guard.</p>
+            <div id="email-message-templates"></div>
+            <p id="email-message-settings-status" role="status"></p>
+            <div class="email-settings-actions">
+              <button type="submit" class="primary">Enregistrer les messages</button>
             </div>
           </form>
         </div>
       </section>
       <section id="users-settings-section" class="settings-section" aria-labelledby="users-settings-title">
+        <button class="settings-back" data-settings-back>← Paramètres</button>
         <h2 id="users-settings-title">Utilisateurs</h2>
-        <div id="remote-account" class="settings-card account-card" hidden>
-        <div><strong>Compte distant</strong><small id="remote-username"></small></div>
-        <button id="logout-button">Se déconnecter</button>
-        <form id="password-form" class="settings-form">
-          <h2>Changer le mot de passe</h2>
-          <label>Mot de passe actuel<input name="current_password" type="password" autocomplete="current-password" required></label>
-          <label>Nouveau mot de passe<input name="new_password" type="password" autocomplete="new-password" minlength="10" required></label>
-          <label>Confirmer<input name="confirmation" type="password" autocomplete="new-password" minlength="10" required></label>
-          <button type="submit" class="primary">Changer le mot de passe</button>
-        </form>
-        </div>
-        <div id="admin-user-management" class="settings-card account-card admin-card" hidden>
-        <div><strong>Administration</strong><small>Rôles et droits des utilisateurs distants</small></div>
-        <div id="admin-users" class="user-list"><p>Chargement…</p></div>
-        </div>
-        <div id="admin-access-note" class="settings-card account-card" hidden>
-        <div><strong>Administration</strong><small>Votre compte n’est pas administrateur. Ce rôle peut être attribué depuis la PWA locale sur le PC Usage Guard.</small></div>
+        <div id="admin-user-management" class="admin-management" hidden>
+          <section class="settings-card admin-compact-list">
+            <div class="admin-list-heading admin-user-heading"><small>Nom et nature du compte</small></div>
+            <div id="admin-users" class="user-list"><p>Chargement…</p></div>
+          </section>
+          <h2 class="admin-section-title">Ordinateurs</h2>
+          <section class="settings-card admin-compact-list">
+            <div class="admin-list-heading admin-device-heading">
+              <small>Propriétaire &gt; ordinateur</small>
+              <button id="create-device-enrollment" class="primary">Installer ou réinstaller un ordinateur</button>
+            </div>
+            <div id="device-enrollment-result" class="enrollment-result" hidden></div>
+            <div id="admin-devices" class="device-list"><p>Chargement…</p></div>
+          </section>
         </div>
         <div id="local-user-management" class="settings-card account-card" hidden>
-        <div><strong>Utilisateurs distants</strong><small>Création autorisée uniquement depuis ce PC</small></div>
+        <form id="local-device-name-form" class="device-name-settings" hidden>
+          <label for="local-device-name"><strong>Nom de l’ordinateur</strong><small>Nom unique utilisé dans toutes les vues</small></label>
+          <input id="local-device-name" name="label" minlength="1" maxlength="80" autocomplete="off" required>
+          <button type="submit">Renommer</button>
+        </form>
+        <div class="settings-card-intro"><strong>Utilisateurs distants</strong><small>Création autorisée uniquement depuis ce PC</small></div>
         <div id="remote-users" class="user-list"><p>Chargement…</p></div>
         <div class="user-actions"><button id="refresh-users">Actualiser</button><button id="create-user" class="primary">Créer un utilisateur</button></div>
         </div>
       </section>
+      <section id="backup-settings-section" class="settings-section" aria-labelledby="backup-settings-title">
+        <button class="settings-back" data-settings-back>← Paramètres</button>
+        <h2 id="backup-settings-title">Sauvegarde du serveur</h2>
+        <div class="settings-card">
+          <div class="settings-card-intro"><strong>Base de données Usage Guard</strong><small>Comptes, appareils, politiques et activités enregistrés sur le serveur</small></div>
+          <p>La sauvegarde est créée transactionnellement par SQLite au moment du téléchargement. Elle n’interrompt pas le service et n’est jamais incluse dans une mise à jour.</p>
+          <p id="database-backup-status" role="status">Aucune sauvegarde téléchargée pendant cette session.</p>
+          <div class="traffic-actions"><button id="download-database-backup" type="button" class="primary">Télécharger la sauvegarde SQLite</button></div>
+        </div>
+      </section>
       <section id="backend-traffic-section" class="settings-section" aria-labelledby="backend-traffic-title">
-        <h2 id="backend-traffic-title">Synchronisation distante</h2>
+        <button class="settings-back" data-settings-back>← Paramètres</button>
+        <h2 id="backend-traffic-title">Version et mise à jour</h2>
+        <div class="settings-card traffic-card client-version-card">
+          <div class="settings-card-intro"><strong>Usage Guard</strong><small>Mise à jour téléchargée uniquement après votre confirmation</small></div>
+          <div class="traffic-grid client-version-grid">
+            <div><span>Version installée</span><strong id="client-version-current">—</strong></div>
+            <div><span>Version disponible</span><strong id="client-version-available">—</strong></div>
+          </div>
+          <p id="client-update-status">Vérification de la version…</p>
+          <p id="client-update-notes" hidden></p>
+          <progress id="client-update-progress" class="client-update-progress" hidden></progress>
+          <div class="traffic-actions"><button id="refresh-client-update">Vérifier les mises à jour</button><button id="install-client-update" class="primary" hidden>Télécharger et mettre à jour</button></div>
+        </div>
         <div class="settings-card traffic-card">
-          <div><strong>Flux téléversé vers le serveur</strong><small>Mesure locale depuis le dernier reset</small></div>
+          <div class="settings-card-intro"><strong>Flux téléversé vers le serveur</strong><small>Mesure locale depuis le dernier reset</small></div>
           <div class="traffic-grid" id="backend-traffic">
             <div><span>Total</span><strong id="backend-upload-total">—</strong></div>
             <div><span>Moyenne</span><strong id="backend-upload-rate">—</strong></div>
@@ -359,6 +463,7 @@
         </div>
       </section>
       <section id="defaults-settings-section" class="settings-section" aria-labelledby="defaults-settings-title">
+        <button class="settings-back" data-settings-back>← Paramètres</button>
         <h2 id="defaults-settings-title">Valeurs par défaut</h2>
         <div class="settings-card">
           <div class="settings-subheading"><strong>Notifications</strong><small>Réglages appliqués aux nouvelles limitations</small></div>
@@ -373,10 +478,134 @@
 
   </main>
 
+  <dialog id="limit-editor-dialog" class="complete-editor-dialog" aria-labelledby="limit-editor-title">
+    <form id="limit-editor-form">
+      <div class="dialog-head"><h2 id="limit-editor-title">Nouvelle limitation</h2><button id="limit-editor-close" type="button" class="icon-button" aria-label="Fermer">×</button></div>
+      <div class="complete-editor-grid limit-editor-compact-grid">
+        <section class="limit-editor-scope-section" aria-label="Périmètre de la limitation">
+          <select id="limit-editor-person" aria-label="Personne à limiter" required></select>
+          <details id="limit-editor-device-menu" class="scope-checklist limit-editor-scope-checklist">
+            <summary id="limit-editor-scope-summary">Ordinateurs sélectionnés</summary>
+            <div id="limit-editor-scope-devices" class="scope-checklist-options limit-editor-scope-devices" role="group" aria-label="Ordinateurs concernés"></div>
+          </details>
+        </section>
+        <section class="complete-editor-section limit-editor-definition-section">
+          <div class="complete-editor-section-head"><h3>Limitation</h3><button type="button" class="complete-editor-reset" data-limit-editor-reset="target">Reset</button></div>
+          <div class="complete-editor-columns limit-editor-single-column">
+            <label>Cible<select id="limit-editor-target" required></select></label>
+            <label>Action<select id="limit-editor-enforcement-action"><option value="block">Limiter</option><option value="warn">Avertir</option></select></label>
+          </div>
+          <label>Nom de la règle <small>Facultatif · par exemple « École » ou « Nuit ».</small><input id="limit-editor-name" type="text" maxlength="120" autocomplete="off"></label>
+          <input id="limit-editor-enabled" type="hidden" value="1">
+        </section>
+        <section class="complete-editor-section limit-editor-timing-section">
+          <div class="complete-editor-section-head"><h3>Durée, créneau et validité</h3></div>
+          <label>Type<select id="limit-editor-basis"><option value="duration">Durée</option><option value="date">Créneau</option></select></label>
+          <section id="limit-editor-duration-section" class="complete-editor-subsection">
+            <div class="complete-editor-section-head"><h3 id="limit-editor-duration-title">Durée autorisée</h3><button type="button" class="complete-editor-reset" data-limit-editor-reset="duration">Reset</button></div>
+            <label id="limit-editor-duration-label">Temps autorisé<div class="duration-fields"><input id="limit-editor-duration-value" type="number" min="0.01" step="0.01" required><select id="limit-editor-duration-unit"><option value="minutes">Minutes</option><option value="hours">Heures</option></select></div></label>
+          </section>
+          <section id="limit-editor-joker-section" class="complete-editor-subsection">
+            <div class="complete-editor-section-head"><h3>Joker</h3><button type="button" class="complete-editor-reset" data-limit-editor-reset="joker">Reset</button></div>
+            <label id="limit-editor-extension-row">Durée du joker — minimum 5 minutes<div class="duration-fields"><input id="limit-editor-extension-value" type="number" min="5" step="0.01"><select id="limit-editor-extension-unit"><option value="minutes">Minutes</option><option value="hours">Heures</option></select></div></label>
+            <small id="limit-editor-joker-help">Le joker reste intact tant que l’utilisateur ne l’active pas explicitement.</small>
+          </section>
+          <label>Validité<select id="limit-editor-validity-mode"><option value="permanent">Tous les jours</option><option value="period">Période</option><option value="one-time">Une seule fois</option></select></label>
+          <select id="limit-editor-periodicity" hidden><option value="permanent">Permanente</option><option value="one-time">Ponctuelle</option></select>
+          <label id="limit-editor-delete-after-row" class="complete-editor-check" hidden><input id="limit-editor-delete-after" type="checkbox" checked> Supprimer après</label>
+          <section id="limit-editor-validity-section" class="complete-editor-subsection">
+            <div class="complete-editor-section-head"><h3>Période de validité</h3><button type="button" class="complete-editor-reset" data-limit-editor-reset="validity">Reset</button></div>
+            <div class="complete-editor-columns date-time-columns limit-editor-single-column">
+              <label>À partir du<input id="limit-editor-valid-from" type="date"></label>
+              <label>À<input id="limit-editor-valid-from-time" type="time"></label>
+              <label>Jusqu’au<input id="limit-editor-valid-until" type="date"></label>
+              <label>À<input id="limit-editor-valid-until-time" type="time"></label>
+            </div>
+            <small id="limit-editor-validity-help">Choisissez les bornes de la période.</small>
+          </section>
+          <section id="limit-editor-schedule-section" class="complete-editor-subsection">
+            <div class="complete-editor-section-head"><h3 id="limit-editor-schedule-title">Plage quotidienne</h3><button type="button" class="complete-editor-reset" data-limit-editor-reset="schedule">Reset</button></div>
+            <div class="complete-editor-columns limit-editor-single-column">
+              <label>De<input id="limit-editor-schedule-start" type="time"></label>
+              <label>À<input id="limit-editor-schedule-end" type="time"></label>
+            </div>
+            <label id="limit-editor-cutoff-row">Interdire après cette heure<input id="limit-editor-cutoff" type="time"></label>
+            <small id="limit-editor-schedule-help">Indiquez le créneau quotidien concerné.</small>
+          </section>
+          <p id="limit-editor-summary" class="complete-editor-summary" aria-live="polite"></p>
+        </section>
+      </div>
+      <p id="limit-editor-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="limit-editor-cancel" type="button">Annuler</button><button id="limit-editor-submit" type="submit" class="primary">Enregistrer la règle</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="notification-editor-dialog" class="complete-editor-dialog" aria-labelledby="notification-editor-title">
+    <form id="notification-editor-form">
+      <div class="dialog-head"><div><h2 id="notification-editor-title">Nouvelle notification</h2><p>Configurez tout le déclenchement et l’envoi dans cette fenêtre.</p></div><button id="notification-editor-close" type="button" class="icon-button" aria-label="Fermer">×</button></div>
+      <div class="complete-editor-grid">
+        <section class="complete-editor-section">
+          <h3>Événement</h3>
+          <label>Type<select id="notification-editor-kind"></select></label>
+          <label id="notification-editor-warning-rule-row" hidden>Préavis enregistré<select id="notification-editor-warning-rule"></select></label>
+          <label class="complete-editor-check"><input id="notification-editor-custom-message-enabled" type="checkbox"> Personnaliser le message</label>
+          <label id="notification-editor-custom-message-row" hidden>Message<textarea id="notification-editor-description" rows="3" maxlength="500"></textarea><small>Le message automatique est prérempli et peut être remplacé.</small></label>
+          <label class="complete-editor-check"><input id="notification-editor-enabled" type="checkbox" checked> Notification active</label>
+        </section>
+        <section id="notification-editor-trigger-section" class="complete-editor-section">
+          <h3>Déclenchement</h3>
+          <label id="notification-editor-target-row" hidden>Cible<select id="notification-editor-target"></select></label>
+          <label id="notification-editor-threshold-mode-row" hidden>Type de seuil<select id="notification-editor-threshold-mode"><option value="duration">Durée d’utilisation</option><option value="time">Horaire</option><option value="legacy_percent">Pourcentage d’une limite existante</option></select></label>
+          <label id="notification-editor-duration-row" hidden>Prévenir après<div class="duration-fields"><input id="notification-editor-duration-value" type="number" min="0.01" step="0.01"><select id="notification-editor-duration-unit"><option value="minutes">Minutes</option><option value="hours">Heures</option></select></div></label>
+          <label id="notification-editor-time-row" hidden>Prévenir après cette heure<input id="notification-editor-after-time" type="time"></label>
+          <label id="notification-editor-percent-row" hidden>Pourcentage atteint<input id="notification-editor-percent" type="number" min="1" max="100" step="1"></label>
+          <label id="notification-editor-warning-row" hidden>Prévenir avant l’événement<div class="duration-fields"><input id="notification-editor-warning-value" type="number" min="0.01" step="0.01"><select id="notification-editor-warning-unit"><option value="minutes">Minutes</option><option value="hours">Heures</option></select></div></label>
+          <fieldset id="notification-editor-subject-roles-row" hidden><legend>Rôles concernés</legend><div class="weekday-grid role-scope-grid"><label><input type="checkbox" name="notification_subject_role" value="limited">Utilisateur à limiter</label><label><input type="checkbox" name="notification_subject_role" value="user">Utilisateur</label><label><input type="checkbox" name="notification_subject_role" value="admin">Administrateur</label></div></fieldset>
+          <fieldset id="notification-editor-weekdays-row" hidden><legend>Jours du rappel</legend><div class="weekday-grid"><label><input type="checkbox" name="notification_weekday" value="0">Lun.</label><label><input type="checkbox" name="notification_weekday" value="1">Mar.</label><label><input type="checkbox" name="notification_weekday" value="2">Mer.</label><label><input type="checkbox" name="notification_weekday" value="3">Jeu.</label><label><input type="checkbox" name="notification_weekday" value="4">Ven.</label><label><input type="checkbox" name="notification_weekday" value="5">Sam.</label><label><input type="checkbox" name="notification_weekday" value="6">Dim.</label></div></fieldset>
+        </section>
+        <section id="notification-editor-validity-wrapper" class="complete-editor-section" hidden>
+          <h3>Validité</h3>
+          <label class="complete-editor-check"><input id="notification-editor-validity-enabled" type="checkbox"> Limiter cette notification à une période</label>
+          <div id="notification-editor-validity-section" class="complete-editor-columns date-time-columns" hidden>
+            <label>À partir du<input id="notification-editor-valid-from" type="date"></label>
+            <label>À<input id="notification-editor-valid-from-time" type="time"></label>
+            <label>Jusqu’au<input id="notification-editor-valid-until" type="date"></label>
+            <label>À<input id="notification-editor-valid-until-time" type="time"></label>
+          </div>
+        </section>
+        <section class="complete-editor-section">
+          <h3>Envoi</h3>
+          <div class="notification-channel-options">
+            <label><input type="checkbox" name="notification_delivery_complete" value="windows" checked> Windows</label>
+            <label><input type="checkbox" name="notification_delivery_complete" value="email"> E-mail</label>
+          </div>
+          <label id="notification-editor-email-row" hidden>Adresse destinataire<input id="notification-editor-email" type="email" autocomplete="email"></label>
+        </section>
+      </div>
+      <p id="notification-editor-summary" class="complete-editor-summary" aria-live="polite"></p>
+      <p id="notification-editor-error" class="form-error" role="alert" hidden></p>
+      <div class="dialog-actions"><button id="notification-editor-cancel" type="button">Annuler</button><button type="submit" class="primary">Enregistrer la notification</button></div>
+    </form>
+  </dialog>
+
   <dialog id="action-dialog"><form method="dialog"><div class="dialog-head"><h2 id="action-title">Modifier</h2><button type="submit" value="cancel" formnovalidate class="icon-button" aria-label="Fermer">×</button></div><div id="action-fields"></div><div class="dialog-actions"><button type="submit" value="cancel" formnovalidate>Retour</button><button type="submit" id="action-submit" value="default" class="primary">Enregistrer</button></div></form></dialog>
+  <dialog id="remote-mutation-dialog" aria-labelledby="remote-mutation-title" aria-describedby="remote-mutation-status">
+    <form>
+      <div class="dialog-head"><h2 id="remote-mutation-title">Synchronisation de la limitation</h2></div>
+      <div class="remote-mutation-body">
+        <p id="remote-mutation-status" role="status" aria-live="polite">Envoi de la modification au serveur…</p>
+        <progress id="remote-mutation-progress" max="100" value="0">0 %</progress>
+        <p id="remote-mutation-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <div class="dialog-actions">
+        <button id="remote-mutation-retry" type="button" hidden>Réessayer</button>
+        <button id="remote-mutation-cancel" type="button">Annuler</button>
+      </div>
+    </form>
+  </dialog>
   <div id="context-menu" class="context-menu" role="menu" hidden></div>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="i18n.js?v=1.075"></script>
-  <script src="app.js?v=1.075"></script>
+  <script src="i18n.js?v=1.132"></script>
+  <script src="app.js?v=1.132"></script>
 </body>
 </html>
