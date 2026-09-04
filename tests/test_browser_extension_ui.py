@@ -70,6 +70,25 @@ class BrowserExtensionUiTest(unittest.TestCase):
         used_keys.update({"optionsTitle", "opacityValue", "settingsSaved"})
         self.assertEqual(used_keys - set(english), set())
 
+    def test_extension_catalogs_generate_every_committed_message(self):
+        project = Path(__file__).parents[1]
+        extension = project / "browser_extension"
+        for language in ("en", "fr"):
+            messages = json.loads(
+                (extension / "_locales" / language / "messages.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            catalog = (
+                project
+                / "locales"
+                / language
+                / "LC_MESSAGES"
+                / "browser-extension.po"
+            ).read_text(encoding="utf-8")
+            catalog_keys = set(re.findall(r'^msgid "([^\"]+)"$', catalog, re.MULTILINE))
+            self.assertEqual(set(messages) - catalog_keys, set())
+
     def test_extension_button_uses_the_configured_duration_unit(self):
         script = (
             Path(__file__).parents[1] / "browser_extension" / "content.js"

@@ -55,4 +55,7 @@ for po in project.glob("locales/*/LC_MESSAGES/browser-extension.po"):
     }
     destination = project / "browser_extension" / "_locales" / language / "messages.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(json.dumps(messages, ensure_ascii=False, indent=2), encoding="utf-8")
+    destination.write_text(
+        json.dumps(messages, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )

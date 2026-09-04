@@ -17,3 +17,54 @@ msgstr "Rallonge en cours…"
 
 msgid "getExtension"
 msgstr "Obtenir une rallonge exceptionnelle de $1"
+
+msgid "optionsTitle"
+msgstr "Usage Guard · Bandeau"
+
+msgid "optionsHeading"
+msgstr "Bandeau Usage Guard"
+
+msgid "optionsDescription"
+msgstr "Ces réglages modifient le rappel avant blocage. Une fois la limite atteinte, le bandeau et le joker restent visibles."
+
+msgid "displayLabel"
+msgstr "Affichage"
+
+msgid "displayWarning"
+msgstr "Uniquement à l’approche de la limite"
+
+msgid "displayPeriodic"
+msgstr "Rappel périodique"
+
+msgid "displayAlways"
+msgstr "Toujours visible"
+
+msgid "displayHidden"
+msgstr "Masqué avant le blocage"
+
+msgid "positionLabel"
+msgstr "Position"
+
+msgid "positionTop"
+msgstr "Bande en haut"
+
+msgid "positionBottom"
+msgstr "Bande en bas"
+
+msgid "opacityLabel"
+msgstr "Opacité du fond"
+
+msgid "opacityValue"
+msgstr "$1 % opaque"
+
+msgid "warningSecondsLabel"
+msgstr "Préavis (secondes)"
+
+msgid "periodicEveryLabel"
+msgstr "Rappel toutes les (secondes)"
+
+msgid "periodicDurationLabel"
+msgstr "Durée du rappel (secondes)"
+
+msgid "settingsSaved"
+msgstr "Réglages enregistrés."

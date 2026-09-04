@@ -17,3 +17,54 @@ msgstr "Extension pending…"
 
 msgid "getExtension"
 msgstr "Get an exceptional extension of $1"
+
+msgid "optionsTitle"
+msgstr "Usage Guard · Banner"
+
+msgid "optionsHeading"
+msgstr "Usage Guard banner"
+
+msgid "optionsDescription"
+msgstr "These settings control the reminder shown before a limit is reached. Once the limit is reached, the banner and exceptional extension remain visible."
+
+msgid "displayLabel"
+msgstr "Display"
+
+msgid "displayWarning"
+msgstr "Only when approaching the limit"
+
+msgid "displayPeriodic"
+msgstr "Periodic reminder"
+
+msgid "displayAlways"
+msgstr "Always visible"
+
+msgid "displayHidden"
+msgstr "Hidden before blocking"
+
+msgid "positionLabel"
+msgstr "Position"
+
+msgid "positionTop"
+msgstr "Top"
+
+msgid "positionBottom"
+msgstr "Bottom"
+
+msgid "opacityLabel"
+msgstr "Background opacity"
+
+msgid "opacityValue"
+msgstr "$1% opaque"
+
+msgid "warningSecondsLabel"
+msgstr "Advance warning (seconds)"
+
+msgid "periodicEveryLabel"
+msgstr "Reminder interval (seconds)"
+
+msgid "periodicDurationLabel"
+msgstr "Reminder duration (seconds)"
+
+msgid "settingsSaved"
+msgstr "Settings saved."
